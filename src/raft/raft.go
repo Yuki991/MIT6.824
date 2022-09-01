@@ -191,6 +191,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
 	if args.Term < rf.currentTerm {
+		Debug(dVote, "S%d <- S%d, currentTerm:%d votedFor:%d args:%v",
+			rf.me, args.CandidateId, rf.currentTerm, rf.votedFor, args)
 		return
 	}
 
@@ -206,6 +208,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 	}
 	rf.mu.Unlock()
+
+	Debug(dVote, "S%d <- S%d, currentTerm:%d votedFor:%d args:%v",
+		rf.me, args.CandidateId, rf.currentTerm, rf.votedFor, args)
 }
 
 //
@@ -334,6 +339,8 @@ func (rf *Raft) convertToCandidate() {
 	rf.currentTerm++
 	// vote for self
 	rf.votedFor = rf.me
+	// change server state to candidate
+	rf.serverState = Candidate
 	//
 	// reset election timer，这个到底应该怎么做
 	// ticker开goroutine执行convertToCandidate，不需要重置这个操作
@@ -347,35 +354,58 @@ func (rf *Raft) convertToCandidate() {
 	}
 	rf.mu.Unlock()
 
+	Debug(dVote, "S%d start election, currentTerm:%d", rf.me, rf.currentTerm)
+
 	// TODO 这样写要等所有的request返回，但实际上只需要majority vote 就可以确定了
 	// 现在是用一个goroutine实现的election，有没有可能同时有两个goroutine卡在这个位置，
-	// 然后同时到下面的是否选举成功的判断的位置？
-	// 有可能，下面的写法能保证只有一个routine能从
-	wg := new(sync.WaitGroup)
+	// 然后同时到下面的是否选举成功的判断的位置？ 有可能
+
+	// true : 收到majority赞成；false: 收到一个reply
+	replyCh := make(chan bool)
+	// 标识election是否结束
+	ch := make(chan struct{})
+	// 开一个gorountine用于统计有多少个reply，并且如果已经收到半数以上赞同就可以直接往后走
+	go func() {
+		reqNum := len(rf.peers) - 1
+		for i := 0; i < reqNum; i++ {
+			if <-replyCh {
+				ch <- struct{}{}
+			}
+		}
+		if voteCnt <= int32(len(rf.peers))/2 {
+			ch <- struct{}{}
+		}
+	}()
+
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 
-		wg.Add(1)
-		go func() {
+		go func(server int) {
 			reply := RequestVoteReply{}
-			rf.sendRequestVote(i, &requestVoteArgs, &reply)
+			Debug(dTimer, "S%d <- S%d, requestVote request:%v", server, rf.me, requestVoteArgs)
+			if rf.sendRequestVote(server, &requestVoteArgs, &reply) {
+				Debug(dVote, "S%d <- S%d, requestVote reply:%v", rf.me, server, reply)
 
-			if reply.VoteGranted {
-				atomic.AddInt32(&voteCnt, 1)
+				rf.mu.Lock()
+				if reply.Term > rf.currentTerm {
+					rf.convertToFollower(reply.Term)
+				}
+				rf.mu.Unlock()
+
+				if reply.VoteGranted && atomic.AddInt32(&voteCnt, 1) > int32(len(rf.peers))/2 {
+					replyCh <- true
+				} else {
+					replyCh <- false
+				}
 			}
-
-			rf.mu.Lock()
-			if reply.Term > rf.currentTerm {
-				rf.convertToFollower(reply.Term)
-			}
-			rf.mu.Unlock()
-
-			wg.Done()
-		}()
+		}(i)
 	}
-	wg.Wait()
+	// wait for election finished
+	<-ch
+
+	Debug(dTimer, "S%d election voting finished, voteCnt:%d, state:%v", rf.me, voteCnt, rf.serverState)
 
 	// 保证只有一个election goroutine能执行convertToLeader
 	rf.mu.Lock()
@@ -401,6 +431,8 @@ func (rf *Raft) convertToLeader() {
 	// TODO If there exists an N such that N > commitIndex, a majority
 	// of matchIndex[i] >= N, and log[N].term == currentTerm:
 	// set commitIndex = N
+
+	Debug(dLeader, "S%d become leader", rf.me)
 
 	// initialize nextIndex and matchIndex
 	rf.mu.Lock()
@@ -455,16 +487,16 @@ func (rf *Raft) sendHeartbeat() {
 			continue
 		}
 
-		go func() {
+		go func(server int) {
 			reply := AppendEntriesReply{}
-			rf.sendAppendEntries(i, &appendEntriesArgs, &reply)
-
-			rf.mu.Lock()
-			if reply.Term > rf.currentTerm {
-				rf.convertToFollower(reply.Term)
+			if rf.sendAppendEntries(server, &appendEntriesArgs, &reply) {
+				rf.mu.Lock()
+				if reply.Term > rf.currentTerm {
+					rf.convertToFollower(reply.Term)
+				}
+				rf.mu.Unlock()
 			}
-			rf.mu.Unlock()
-		}()
+		}(i)
 	}
 }
 
@@ -506,8 +538,8 @@ func (rf *Raft) ticker() {
 		rf.electionTimeout = true
 		rf.mu.Unlock()
 
-		sleepTime := rand.Intn(100) + 300
-		time.Sleep(time.Duration(sleepTime) * time.Microsecond)
+		sleepTime := rand.Intn(200) + 200
+		time.Sleep(time.Duration(sleepTime) * time.Millisecond)
 
 		if _, isLeader := rf.GetState(); !isLeader && rf.electionTimeout {
 			go rf.convertToCandidate()

@@ -1,0 +1,104 @@
+003368 S0 start election, currentTerm:1
+003375 S2 <- S0, currentTerm:1 votedFor:0 args:&{1 0 0 0}
+003375 S1 <- S0, currentTerm:1 votedFor:0 args:&{1 0 0 0}
+003376 S2 start election, currentTerm:2
+003377 S0 <- S2, requestVote reply:{0 true}
+003377 S1 <- S2, currentTerm:2 votedFor:2 args:&{2 2 0 0}
+003378 S0 <- S1, requestVote reply:{0 true}
+003378 S0 election voting finished, voteCnt:3, state:1
+003378 S0 become leader
+003378 S2 <- S1, requestVote reply:{1 true}
+003378 S1 start election, currentTerm:3
+003379 S2 <- S1, currentTerm:3 votedFor:1 args:&{3 1 0 0}
+003380 S1 <- S2, requestVote reply:{2 true}
+003381 S0 <- S2, currentTerm:2 votedFor:2 args:&{2 2 0 0}
+003382 S2 <- S0, requestVote reply:{1 true}
+003382 S2 election voting finished, voteCnt:3, state:0
+003383 S0 <- S1, currentTerm:3 votedFor:1 args:&{3 1 0 0}
+003384 S1 <- S0, requestVote reply:{3 true}
+003384 S1 election voting finished, voteCnt:3, state:1
+003384 S1 become leader
+008885 S0 start election, currentTerm:4
+008886 S2 <- S0, currentTerm:4 votedFor:0 args:&{4 0 0 0}
+008887 S0 <- S2, requestVote reply:{3 true}
+009364 S2 start election, currentTerm:5
+009366 S0 <- S2, currentTerm:5 votedFor:2 args:&{5 2 0 0}
+009367 S2 <- S0, requestVote reply:{4 true}
+011890 S0 start election, currentTerm:6
+011893 S2 <- S0, currentTerm:6 votedFor:0 args:&{6 0 0 0}
+011894 S0 <- S2, requestVote reply:{5 true}
+011998 S2 start election, currentTerm:7
+012000 S0 <- S2, currentTerm:7 votedFor:2 args:&{7 2 0 0}
+012001 S2 <- S0, requestVote reply:{6 true}
+014523 S0 start election, currentTerm:8
+014528 S2 <- S0, currentTerm:8 votedFor:0 args:&{8 0 0 0}
+014531 S0 <- S2, requestVote reply:{7 true}
+014954 S2 start election, currentTerm:9
+014956 S0 <- S2, currentTerm:9 votedFor:2 args:&{9 2 0 0}
+014957 S2 <- S0, requestVote reply:{8 true}
+018138 S0 start election, currentTerm:10
+018141 S2 <- S0, currentTerm:10 votedFor:0 args:&{10 0 0 0}
+018142 S0 <- S2, requestVote reply:{9 true}
+018182 S2 start election, currentTerm:11
+018184 S0 <- S2, currentTerm:11 votedFor:2 args:&{11 2 0 0}
+018185 S2 <- S0, requestVote reply:{10 true}
+021410 S0 start election, currentTerm:12
+021412 S2 <- S0, currentTerm:12 votedFor:0 args:&{12 0 0 0}
+021413 S0 <- S2, requestVote reply:{11 true}
+021645 S2 start election, currentTerm:13
+021646 S0 <- S2, currentTerm:13 votedFor:2 args:&{13 2 0 0}
+021647 S2 <- S0, requestVote reply:{12 true}
+021729 S0 election voting finished, voteCnt:2, state:0
+022656 S0 election voting finished, voteCnt:2, state:0
+023675 S2 election voting finished, voteCnt:2, state:1
+023676 S2 become leader
+032325 S1 start election, currentTerm:14
+034836 S1 start election, currentTerm:15
+034991 S0 start election, currentTerm:14
+036988 S1 start election, currentTerm:16
+037061 S0 start election, currentTerm:15
+038138 S2 election voting finished, voteCnt:2, state:2
+040652 S0 start election, currentTerm:16
+040897 S1 start election, currentTerm:17
+042840 S0 election voting finished, voteCnt:2, state:1
+042840 S0 become leader
+043244 S1 start election, currentTerm:18
+044884 S0 election voting finished, voteCnt:2, state:2
+046617 S1 start election, currentTerm:19
+049529 S1 start election, currentTerm:20
+051631 S0 start election, currentTerm:21
+051633 S1 <- S0, currentTerm:21 votedFor:0 args:&{21 0 0 0}
+051635 S0 <- S1, requestVote reply:{20 true}
+052199 S1 election voting finished, voteCnt:1, state:0
+052671 S1 start election, currentTerm:22
+052675 S0 <- S1, currentTerm:22 votedFor:1 args:&{22 1 0 0}
+052676 S1 <- S0, requestVote reply:{21 true}
+054278 S0 start election, currentTerm:23
+054281 S1 <- S0, currentTerm:23 votedFor:0 args:&{23 0 0 0}
+054282 S0 <- S1, requestVote reply:{22 true}
+056144 S1 start election, currentTerm:24
+056146 S0 <- S1, currentTerm:24 votedFor:1 args:&{24 1 0 0}
+056148 S1 <- S0, requestVote reply:{23 true}
+057497 S0 start election, currentTerm:25
+057500 S1 <- S0, currentTerm:25 votedFor:0 args:&{25 0 0 0}
+057501 S0 <- S1, requestVote reply:{24 true}
+059788 S1 start election, currentTerm:26
+059793 S0 <- S1, currentTerm:26 votedFor:1 args:&{26 1 0 0}
+059795 S1 <- S0, requestVote reply:{25 true}
+059937 S0 start election, currentTerm:27
+059940 S1 <- S0, currentTerm:27 votedFor:0 args:&{27 0 0 0}
+059941 S0 <- S1, requestVote reply:{26 true}
+059963 S1 election voting finished, voteCnt:1, state:0
+062619 S1 start election, currentTerm:28
+062622 S0 <- S1, currentTerm:28 votedFor:1 args:&{28 1 0 0}
+062623 S1 <- S0, requestVote reply:{27 true}
+063869 S0 start election, currentTerm:29
+063872 S1 <- S0, currentTerm:29 votedFor:0 args:&{29 0 0 0}
+063874 S0 <- S1, requestVote reply:{28 true}
+064669 S0 election voting finished, voteCnt:2, state:1
+064670 S0 become leader
+068106 S2 election voting finished, voteCnt:2, state:0
+068429 S2 election voting finished, voteCnt:2, state:0
+069577 S1 election voting finished, voteCnt:1, state:0
+################################################################################
+PASS
