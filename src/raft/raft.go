@@ -79,7 +79,6 @@ type Raft struct {
 
 	// volatile state on all servers
 	commitIndex int // index of highest log entry known to be committed
-	// TODO 暂时还没有处理这个last applied
 	lastApplied int // index of highest log entry applied to state machine
 
 	// volatile state on leaders
@@ -87,10 +86,10 @@ type Raft struct {
 	matchIndex []int // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
 
 	// TODO auxiliary variables if needed
-	electionTimeout bool          // true means If election timeout elapses without receiving AppendEntries RPC from current leader or granting vote to candidate
-	serverState     ServerState   // indicate the current state of server
-	applyCh         chan ApplyMsg // used to send message to tell the service there is a new committed command
-	leaderId        int
+	electionTimeout   bool        // true means If election timeout elapses without receiving AppendEntries RPC from current leader or granting vote to candidate
+	serverState       ServerState // indicate the current state of server
+	lastNewEntryIndex int         // index of last received from the leader of currentTerm
+	leaderId          int
 }
 
 // return currentTerm and whether this server
@@ -295,16 +294,43 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// discover same index and same term, accept appendEntries RPC
 			reply.Success = true
 
-			// append logs, discard conflict logs
-			rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+			// 加了一条lastNewEntryIndex <= args.PrevLogIndex
+			// 能够保在接受相同index的appendEntries RPC请求的时候
+			// 不会覆盖别的请求的结果
+			if rf.lastNewEntryIndex <= args.PrevLogIndex {
+				// append logs, discard conflict logs
+				// if len(rf.log)-1 >= args.PrevLogIndex+len(args.Entries) {
+				// 	for i, e := range args.Entries {
+				// 		rf.log[args.PrevLogIndex+i+1] = e
+				// 	}
+				// } else {
+				// 	rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+				// }
+
+				// Attention: "lastNewEntryIndex = len(rf.log) - 1"这种写法有问题，
+				// log里可能包含错误的条目导致长度上不对
+				// 之前错是换因为了上面的写法，这里又没写对
+				// rf.lastNewEntryIndex = args.PrevLogIndex + len(args.Entries)
+
+				//
+				// Attention: 仔细想想这个写法会出什么问题
+				// 旧的goroutine会扔掉新的goroutine的结果
+				// 新的routine添加了index2和3，然后旧的routine添加2，把3扔掉了
+				// 需要加锁以及加上lastNewEntryIndex <= preLogIndex这条判断
+				// 注意这个判断在args.Entries长度>1时需要做相应修改
+				//
+				rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+				rf.lastNewEntryIndex = len(rf.log) - 1
+				//
+			}
 		}
 	}
 
 	// update commitIndex
 	if args.LeaderCommit > rf.commitIndex {
 		newCommitIndex := args.LeaderCommit
-		if len(rf.log)-1 < newCommitIndex {
-			newCommitIndex = len(rf.log) - 1
+		if rf.lastNewEntryIndex < newCommitIndex {
+			newCommitIndex = rf.lastNewEntryIndex
 		}
 		rf.commitIndex = newCommitIndex
 	}
@@ -359,6 +385,7 @@ func (rf *Raft) convertToFollower(term int) {
 	rf.serverState = Follower
 	rf.currentTerm = term
 	rf.votedFor = -1
+	rf.lastNewEntryIndex = 0
 }
 
 // time out, conver follower to candidate and start election
@@ -477,10 +504,6 @@ func (rf *Raft) convertToLeader() {
 	}
 	rf.mu.Unlock()
 
-	// 标识目前达成commit一致的index（参见raft figure2）
-	// 同时也是heartbeat中发送的LeaderCommit(LeaderCommit不能直接发leader的commitIndex)
-	N := 0
-
 	// goroutine checks if last log index >= nextIndex for a follower
 	// if not, send heartbeat periodically
 	for i := range rf.peers {
@@ -489,10 +512,12 @@ func (rf *Raft) convertToLeader() {
 		}
 
 		go func(server int) {
-			rf.sendHeartbeat(server, N)
+			rf.sendHeartbeat(server)
 
 			// send message to channel periodically
 			go func() {
+				// 限制goroutine个数
+				ch := make(chan struct{}, 10)
 				for {
 					// TODO 每隔一段时间发送心跳包，间隔设多少？
 					time.Sleep(150 * time.Millisecond)
@@ -503,18 +528,28 @@ func (rf *Raft) convertToLeader() {
 					// TODO 这个可能会出问题，比如一直阻塞但是一直在开goroutine，然后爆了
 					// 不开goroutine就可能会导致之前的一直阻塞，发不了新的
 					// 讲道理这个调用如果一段时间没有结束应该直接返回才对
-					rf.sendHeartbeat(server, N)
+					ch <- struct{}{}
+					go func() {
+						rf.sendHeartbeat(server)
+					}()
+					<-ch
 				}
 			}()
 
+			// 限制goroutine个数
+			ch := make(chan struct{}, 10)
 			for {
 				// 每隔一段时间检查是否需要append entries
-				time.Sleep(10 * time.Millisecond)
+				time.Sleep(20 * time.Millisecond)
 				if rf.serverState != Leader {
 					break
 				}
 
-				rf.checkAppendEntries(server)
+				ch <- struct{}{}
+				go func() {
+					rf.checkAppendEntries(server)
+				}()
+				<-ch
 			}
 		}(i)
 	}
@@ -538,14 +573,12 @@ func (rf *Raft) convertToLeader() {
 			return arr[i] > arr[j]
 		})
 
-		// Debug(dInfo, "S%d, term: %v, nextIndex:%v, matchIndex:%v, arr: %v, mIndex:%v",
-		// rf.me, rf.currentTerm, rf.nextIndex, rf.matchIndex, arr, mIndex)
+		Debug(dInfo, "S%d, logLength:%v term: %v, nextIndex:%v, matchIndex:%v, arr: %v, mIndex:%v",
+			rf.me, len(rf.log), rf.currentTerm, rf.nextIndex, rf.matchIndex, arr, mIndex)
 
 		rf.mu.Lock()
-		if newCommitIndex := arr[mIndex]; newCommitIndex > N &&
-			newCommitIndex > rf.commitIndex &&
+		if newCommitIndex := arr[mIndex]; newCommitIndex > rf.commitIndex &&
 			rf.log[newCommitIndex].Term == rf.currentTerm {
-			N = newCommitIndex
 			rf.commitIndex = newCommitIndex
 		}
 		rf.mu.Unlock()
@@ -553,86 +586,93 @@ func (rf *Raft) convertToLeader() {
 }
 
 // leader send heartbeat to each server
-func (rf *Raft) sendHeartbeat(server, LeaderCommit int) {
-	go func() {
+func (rf *Raft) sendHeartbeat(server int) {
+	rf.mu.Lock()
+	// TODO heartbeat里prevlogindex和prevlogterm应该可以随便设，反正没用
+	// 设了效率会高一点，更新nextIndex
+	appendEntriesArgs := AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		Entries:      []LogEntry{},
+		LeaderCommit: rf.commitIndex,
+	}
+	rf.mu.Unlock()
+
+	reply := AppendEntriesReply{}
+	Debug(dTimer, "S%d <- S%d, send Heartbeat: %v", server, rf.me, appendEntriesArgs)
+	if rf.sendAppendEntries(server, &appendEntriesArgs, &reply) {
 		rf.mu.Lock()
-		// TODO heartbeat里prevlogindex和prevlogterm应该可以随便设，反正没用
-		// 设了效率会高一点，更新nextIndex
-		appendEntriesArgs := AppendEntriesArgs{
-			Term:         rf.currentTerm,
-			LeaderId:     rf.me,
-			PrevLogIndex: 0,
-			PrevLogTerm:  0,
-			Entries:      []LogEntry{},
-			LeaderCommit: LeaderCommit,
+		Debug(dTimer, "S%d <- S%d, receive Heartbeat Response: %v", rf.me, server, reply)
+		if reply.Term > rf.currentTerm {
+			rf.convertToFollower(reply.Term)
 		}
 		rf.mu.Unlock()
-
-		reply := AppendEntriesReply{}
-		Debug(dTimer, "S%d <- S%d, send Heartbeat: %v", server, rf.me, appendEntriesArgs)
-		if rf.sendAppendEntries(server, &appendEntriesArgs, &reply) {
-			rf.mu.Lock()
-			Debug(dTimer, "S%d <- S%d, receive Heartbeat Response: %v", rf.me, server, reply)
-			if reply.Term > rf.currentTerm {
-				rf.convertToFollower(reply.Term)
-			}
-			rf.mu.Unlock()
-		}
-	}()
+	}
 }
 
 // check whether to send AppendEntries RPC
 func (rf *Raft) checkAppendEntries(server int) {
-	// TOOD 这样写可能会导致阻塞大量goroutine
-	go func() {
-		for {
-			rf.mu.Lock()
-			// no need to append entries or isn't leader, break
-			if len(rf.log)-1 < rf.nextIndex[server] || rf.serverState != Leader {
-				rf.mu.Unlock()
-				break
-			}
-
-			Debug(dLeader, "S%d -> S%d, try to append entries", rf.me, server)
-
-			// TODO 一次性发送多个？现在暂时是一次发送一个
-			appendEntriesArgs := AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: rf.nextIndex[server] - 1,
-				PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
-				Entries:      []LogEntry{rf.log[rf.nextIndex[server]]},
-				LeaderCommit: rf.commitIndex,
-			}
+	// TODO 这样写可能会导致阻塞大量goroutine
+	// 这样写还有个问题
+	// 比如有K个routine尝试在index=3之后加东西，如果成功的话，全部都会成功...
+	// 然后就导致nextIndex这些都出错了
+	///////////////////////////////////////////////////////////////
+	for {
+		rf.mu.Lock()
+		// no need to append entries or isn't leader, break
+		if len(rf.log)-1 < rf.nextIndex[server] || rf.serverState != Leader {
 			rf.mu.Unlock()
-
-			reply := AppendEntriesReply{}
-			// TODO 有没有可能会阻塞在这的？
-			Debug(dLeader, "S%d <- S%d, send AppendEntries RPC: %v", server, rf.me, appendEntriesArgs)
-			if !rf.sendAppendEntries(server, &appendEntriesArgs, &reply) {
-				// no response, break
-				break
-			}
-
-			// update nextIndex and matchIndex
-			rf.mu.Lock()
-			// TODO 注意，现在是一次append一个，一次append多个的话这里也要做相应修改
-			if reply.Success {
-				rf.matchIndex[server] = rf.nextIndex[server]
-				rf.nextIndex[server]++
-			} else {
-				rf.nextIndex[server]--
-			}
-			Debug(dLeader, "S%d <- S%d, receive AppendEntries response: %v, nextIndex:%v",
-				rf.me, server, reply, rf.nextIndex)
-
-			// discover new leader
-			if reply.Term > rf.currentTerm {
-				rf.convertToFollower(reply.Term)
-			}
-			rf.mu.Unlock()
+			break
 		}
-	}()
+
+		Debug(dLeader, "S%d -> S%d, try to append entries", rf.me, server)
+
+		// TODO 一次性发送多个？现在暂时是一次发送一个
+		args := AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: rf.nextIndex[server] - 1,
+			PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
+			Entries:      []LogEntry{rf.log[rf.nextIndex[server]]},
+			LeaderCommit: rf.commitIndex,
+		}
+		rf.mu.Unlock()
+
+		reply := AppendEntriesReply{}
+		// TODO 有没有可能会阻塞在这的？
+		Debug(dLeader, "S%d <- S%d, send AppendEntries RPC: %v", server, rf.me, args)
+		if !rf.sendAppendEntries(server, &args, &reply) {
+			// no response, break
+			break
+		}
+
+		rf.mu.Lock()
+		// discover new leader
+		if reply.Term > rf.currentTerm {
+			rf.convertToFollower(reply.Term)
+		}
+
+		// TODO 注意，现在是一次append一个，一次append多个的话这里也要做相应修改
+		if reply.Success {
+			if args.PrevLogIndex+len(args.Entries)+1 > rf.nextIndex[server] {
+				rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
+				rf.matchIndex[server] = rf.nextIndex[server] - 1
+			}
+		} else {
+			// TODO 这里的多个请求到底怎么处理比较好
+			if args.PrevLogIndex+1 == rf.nextIndex[server] {
+				rf.nextIndex[server]--
+			} else {
+				// 别的routine已经成功返回
+				break
+			}
+		}
+		Debug(dLeader, "S%d <- S%d, receive AppendEntries response: %v, nextIndex:%v",
+			rf.me, server, reply, rf.nextIndex)
+		rf.mu.Unlock()
+	}
 }
 
 //
@@ -676,28 +716,29 @@ func (rf *Raft) ticker() {
 
 		sleepTime := rand.Intn(200) + 200
 		time.Sleep(time.Duration(sleepTime) * time.Millisecond)
-		Debug(dInfo, "S%d ticker, killed:%v, state: %v, term: %v, log: %v, commitIndex:%v",
-			rf.me, rf.killed(), rf.serverState, rf.currentTerm, rf.log, rf.commitIndex)
+		Debug(dInfo, "S%d ticker, killed:%v, state: %v, term: %v, logLength: %v, commitIndex:%v, lastApplied:%v, lastNewEntryIndex:%v",
+			rf.me, rf.killed(), rf.serverState, rf.currentTerm, len(rf.log), rf.commitIndex, rf.lastApplied, rf.lastNewEntryIndex)
 		if _, isLeader := rf.GetState(); !isLeader && rf.electionTimeout {
 			go rf.convertToCandidate()
 		}
 	}
 }
 
-func (rf *Raft) updateLastApplied() {
+func (rf *Raft) updateLastApplied(applyCh chan ApplyMsg) {
 	for rf.killed() == false {
 		time.Sleep(20 * time.Millisecond)
 
 		for rf.lastApplied < rf.commitIndex {
 			rf.lastApplied++
-			Debug(dError, "S%d apply log[%d]:%v", rf.me, rf.lastApplied, rf.log[rf.lastApplied])
+			Debug(dError, "S%d apply log[%d]:%v, lastNewEntryIndex:%v, commitIndex:%v, logLength:%v",
+				rf.me, rf.lastApplied, rf.log[rf.lastApplied], rf.lastNewEntryIndex, rf.commitIndex, len(rf.log))
 			applyMsg := ApplyMsg{
 				CommandValid: true,
 				Command:      rf.log[rf.lastApplied].Command,
 				CommandIndex: rf.lastApplied,
 			}
-			rf.applyCh <- applyMsg
-			Debug(dError, "S%d apply log[%d]:%v Succeed.", rf.me, rf.lastApplied, rf.log[rf.lastApplied])
+			applyCh <- applyMsg
+			// Debug(dError, "S%d apply log[%d]:%v Succeed.", rf.me, rf.lastApplied, rf.log[rf.lastApplied])
 		}
 	}
 }
@@ -725,14 +766,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.serverState = Follower
 	rf.currentTerm = 0
 	rf.votedFor = -1
+	rf.lastNewEntryIndex = 0
 	rf.log = make([]LogEntry, 1)
 	rf.log[0].Term = 0
 
 	// 开一个定时器检查是否有需要apply到service的log entry(lastApplied < commitIndex)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
-	rf.applyCh = applyCh
-	go rf.updateLastApplied()
+	go rf.updateLastApplied(applyCh)
 
 	// TODO 如果server数目会改变，这样写就有问题了
 	rf.nextIndex = make([]int, len(peers))
