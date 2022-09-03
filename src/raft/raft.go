@@ -306,22 +306,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if len(rf.log)-1 < newCommitIndex {
 			newCommitIndex = len(rf.log) - 1
 		}
-
-		// TODO update commit index and send msg to service through applyCh
-		for i := rf.commitIndex + 1; i <= newCommitIndex; i++ {
-			go func(index int) {
-				applyMsg := ApplyMsg{
-					CommandValid: true,
-					Command:      rf.log[index].Command,
-					CommandIndex: index,
-				}
-				rf.applyCh <- applyMsg
-			}(i)
-		}
 		rf.commitIndex = newCommitIndex
 	}
-
-	// Debug(dInfo, "S%d state, term: %v, log: %v", rf.me, rf.currentTerm, rf.log)
 }
 
 // send AppendEntries RPC
@@ -357,6 +343,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := (rf.serverState == Leader)
 
 	// append command to log if server believes it is the leader
+	// TODO 需要判断这条command是否已经在log里，防止因为网络原因使得同一条log执行两次吗？
 	if isLeader {
 		rf.log = append(rf.log, LogEntry{term, command})
 	}
@@ -490,6 +477,10 @@ func (rf *Raft) convertToLeader() {
 	}
 	rf.mu.Unlock()
 
+	// 标识目前达成commit一致的index（参见raft figure2）
+	// 同时也是heartbeat中发送的LeaderCommit(LeaderCommit不能直接发leader的commitIndex)
+	N := 0
+
 	// goroutine checks if last log index >= nextIndex for a follower
 	// if not, send heartbeat periodically
 	for i := range rf.peers {
@@ -498,7 +489,7 @@ func (rf *Raft) convertToLeader() {
 		}
 
 		go func(server int) {
-			rf.sendHeartbeat(server)
+			rf.sendHeartbeat(server, N)
 
 			// send message to channel periodically
 			go func() {
@@ -512,7 +503,7 @@ func (rf *Raft) convertToLeader() {
 					// TODO 这个可能会出问题，比如一直阻塞但是一直在开goroutine，然后爆了
 					// 不开goroutine就可能会导致之前的一直阻塞，发不了新的
 					// 讲道理这个调用如果一段时间没有结束应该直接返回才对
-					rf.sendHeartbeat(server)
+					rf.sendHeartbeat(server, N)
 				}
 			}()
 
@@ -551,19 +542,10 @@ func (rf *Raft) convertToLeader() {
 		// rf.me, rf.currentTerm, rf.nextIndex, rf.matchIndex, arr, mIndex)
 
 		rf.mu.Lock()
-		if newCommitIndex := arr[mIndex]; newCommitIndex > rf.commitIndex &&
+		if newCommitIndex := arr[mIndex]; newCommitIndex > N &&
+			newCommitIndex > rf.commitIndex &&
 			rf.log[newCommitIndex].Term == rf.currentTerm {
-			// TODO update commit index and send msg to service through applyCh
-			for i := rf.commitIndex + 1; i <= newCommitIndex; i++ {
-				go func(index int) {
-					applyMsg := ApplyMsg{
-						CommandValid: true,
-						Command:      rf.log[index].Command,
-						CommandIndex: index,
-					}
-					rf.applyCh <- applyMsg
-				}(i)
-			}
+			N = newCommitIndex
 			rf.commitIndex = newCommitIndex
 		}
 		rf.mu.Unlock()
@@ -571,7 +553,7 @@ func (rf *Raft) convertToLeader() {
 }
 
 // leader send heartbeat to each server
-func (rf *Raft) sendHeartbeat(server int) {
+func (rf *Raft) sendHeartbeat(server, LeaderCommit int) {
 	go func() {
 		rf.mu.Lock()
 		// TODO heartbeat里prevlogindex和prevlogterm应该可以随便设，反正没用
@@ -582,15 +564,15 @@ func (rf *Raft) sendHeartbeat(server int) {
 			PrevLogIndex: 0,
 			PrevLogTerm:  0,
 			Entries:      []LogEntry{},
-			LeaderCommit: rf.commitIndex,
+			LeaderCommit: LeaderCommit,
 		}
 		rf.mu.Unlock()
 
 		reply := AppendEntriesReply{}
-		Debug(dLeader, "S%d <- S%d, send Heartbeat: %v", server, rf.me, appendEntriesArgs)
+		Debug(dTimer, "S%d <- S%d, send Heartbeat: %v", server, rf.me, appendEntriesArgs)
 		if rf.sendAppendEntries(server, &appendEntriesArgs, &reply) {
 			rf.mu.Lock()
-			Debug(dLeader, "S%d <- S%d, receive Heartbeat Response: %v", rf.me, server, reply)
+			Debug(dTimer, "S%d <- S%d, receive Heartbeat Response: %v", rf.me, server, reply)
 			if reply.Term > rf.currentTerm {
 				rf.convertToFollower(reply.Term)
 			}
@@ -601,49 +583,55 @@ func (rf *Raft) sendHeartbeat(server int) {
 
 // check whether to send AppendEntries RPC
 func (rf *Raft) checkAppendEntries(server int) {
-	// no need to append entries or isn't leader, break
-	if len(rf.log)-1 < rf.nextIndex[server] || rf.serverState != Leader {
-		return
-	}
-
+	// TOOD 这样写可能会导致阻塞大量goroutine
 	go func() {
-		Debug(dLeader, "S%d -> S%d, try to append entries", rf.me, server)
+		for {
+			rf.mu.Lock()
+			// no need to append entries or isn't leader, break
+			if len(rf.log)-1 < rf.nextIndex[server] || rf.serverState != Leader {
+				rf.mu.Unlock()
+				break
+			}
 
-		rf.mu.Lock()
-		// TODO 一次性发送多个？现在暂时是一次发送一个
-		appendEntriesArgs := AppendEntriesArgs{
-			Term:         rf.currentTerm,
-			LeaderId:     rf.me,
-			PrevLogIndex: rf.nextIndex[server] - 1,
-			PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
-			Entries:      []LogEntry{rf.log[rf.nextIndex[server]]},
-			LeaderCommit: rf.commitIndex,
-		}
-		rf.mu.Unlock()
+			Debug(dLeader, "S%d -> S%d, try to append entries", rf.me, server)
 
-		reply := AppendEntriesReply{}
-		// TODO 有没有可能会阻塞在这的？
-		Debug(dLeader, "S%d <- S%d, send AppendEntries RPC: %v", server, rf.me, appendEntriesArgs)
-		if !rf.sendAppendEntries(server, &appendEntriesArgs, &reply) {
-			// no response, break
-			return
-		}
+			// TODO 一次性发送多个？现在暂时是一次发送一个
+			appendEntriesArgs := AppendEntriesArgs{
+				Term:         rf.currentTerm,
+				LeaderId:     rf.me,
+				PrevLogIndex: rf.nextIndex[server] - 1,
+				PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
+				Entries:      []LogEntry{rf.log[rf.nextIndex[server]]},
+				LeaderCommit: rf.commitIndex,
+			}
+			rf.mu.Unlock()
 
-		// update nextIndex and matchIndex
-		rf.mu.Lock()
-		// TODO 注意，现在是一次append一个，一次append多个的话这里也要做相应修改
-		if reply.Success {
-			rf.matchIndex[server] = rf.nextIndex[server]
-			rf.nextIndex[server]++
-		} else {
-			rf.nextIndex[server]--
-		}
+			reply := AppendEntriesReply{}
+			// TODO 有没有可能会阻塞在这的？
+			Debug(dLeader, "S%d <- S%d, send AppendEntries RPC: %v", server, rf.me, appendEntriesArgs)
+			if !rf.sendAppendEntries(server, &appendEntriesArgs, &reply) {
+				// no response, break
+				break
+			}
 
-		// discover new leader
-		if reply.Term > rf.currentTerm {
-			rf.convertToFollower(reply.Term)
+			// update nextIndex and matchIndex
+			rf.mu.Lock()
+			// TODO 注意，现在是一次append一个，一次append多个的话这里也要做相应修改
+			if reply.Success {
+				rf.matchIndex[server] = rf.nextIndex[server]
+				rf.nextIndex[server]++
+			} else {
+				rf.nextIndex[server]--
+			}
+			Debug(dLeader, "S%d <- S%d, receive AppendEntries response: %v, nextIndex:%v",
+				rf.me, server, reply, rf.nextIndex)
+
+			// discover new leader
+			if reply.Term > rf.currentTerm {
+				rf.convertToFollower(reply.Term)
+			}
+			rf.mu.Unlock()
 		}
-		rf.mu.Unlock()
 	}()
 }
 
@@ -696,6 +684,24 @@ func (rf *Raft) ticker() {
 	}
 }
 
+func (rf *Raft) updateLastApplied() {
+	for rf.killed() == false {
+		time.Sleep(20 * time.Millisecond)
+
+		for rf.lastApplied < rf.commitIndex {
+			rf.lastApplied++
+			Debug(dError, "S%d apply log[%d]:%v", rf.me, rf.lastApplied, rf.log[rf.lastApplied])
+			applyMsg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[rf.lastApplied].Command,
+				CommandIndex: rf.lastApplied,
+			}
+			rf.applyCh <- applyMsg
+			Debug(dError, "S%d apply log[%d]:%v Succeed.", rf.me, rf.lastApplied, rf.log[rf.lastApplied])
+		}
+	}
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -721,9 +727,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 1)
 	rf.log[0].Term = 0
+
+	// 开一个定时器检查是否有需要apply到service的log entry(lastApplied < commitIndex)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.applyCh = applyCh
+	go rf.updateLastApplied()
+
 	// TODO 如果server数目会改变，这样写就有问题了
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
