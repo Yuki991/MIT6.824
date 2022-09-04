@@ -27,6 +27,7 @@ import (
 	"time"
 
 	//	"6.824/labgob"
+
 	"6.824/labrpc"
 )
 
@@ -73,13 +74,16 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// persistent state on all servers
-	currentTerm int        // latest term server has seen
-	votedFor    int        // candidate index that received vote in current term
-	log         []LogEntry // log entries
+	// TODO 这里有点点争议，现在(2C)是还没有application的，所以没人能告诉我重置的时候
+	// 应该将lastApplie设成是多少，所以暂时先把lastApplied持久化吧...
+	// 至于commitIndex，重启的时候把它设成等于lastApplied肯定没问题
+	CurrentTerm int        // latest term server has seen
+	VotedFor    int        // candidate index that received vote in current term
+	Log         []LogEntry // log entries
 
 	// volatile state on all servers
-	commitIndex int // index of highest log entry known to be committed
-	lastApplied int // index of highest log entry applied to state machine
+	CommitIndex int // index of highest log entry known to be committed
+	LastApplied int // index of highest log entry applied to state machine
 
 	// volatile state on leaders
 	nextIndex  []int // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
@@ -101,7 +105,7 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	term = rf.currentTerm
+	term = rf.CurrentTerm
 	isleader = (rf.serverState == Leader)
 	return term, isleader
 }
@@ -120,6 +124,9 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+
+	// w := new(bytes.Buffer)
+	// e := labgob.NewEncoder(w)
 }
 
 //
@@ -142,6 +149,7 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
 }
 
 //
@@ -190,23 +198,23 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	Debug(dVote, "S%d <- S%d, receive requestVote: %v", rf.me, args.CandidateId, args)
 	// Your code here (2A, 2B).
-	reply.Term = rf.currentTerm
+	reply.Term = rf.CurrentTerm
 	reply.VoteGranted = false
-	if args.Term < rf.currentTerm {
+	if args.Term < rf.CurrentTerm {
 		return
 	}
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if args.Term > rf.currentTerm {
+	if args.Term > rf.CurrentTerm {
 		rf.convertToFollower(args.Term)
 	}
-	if lastLogIndex := len(rf.log) - 1; (rf.votedFor < 0 || rf.votedFor == args.CandidateId) &&
-		(rf.log[lastLogIndex].Term < args.LastLogTerm ||
-			(rf.log[lastLogIndex].Term == args.LastLogTerm && lastLogIndex <= args.LastLogIndex)) {
+	if lastLogIndex := len(rf.Log) - 1; (rf.VotedFor < 0 || rf.VotedFor == args.CandidateId) &&
+		(rf.Log[lastLogIndex].Term < args.LastLogTerm ||
+			(rf.Log[lastLogIndex].Term == args.LastLogTerm && lastLogIndex <= args.LastLogIndex)) {
 		// vote for candidate
 		reply.VoteGranted = true
-		rf.votedFor = args.CandidateId
+		rf.VotedFor = args.CandidateId
 	}
 }
 
@@ -262,9 +270,9 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	Debug(dLeader, "S%d <- S%d, receive AppendEntries RPC: %v", rf.me, args.LeaderId, args)
 
-	reply.Term = rf.currentTerm
+	reply.Term = rf.CurrentTerm
 	reply.Success = false
-	if args.Term < rf.currentTerm {
+	if args.Term < rf.CurrentTerm {
 		return
 	}
 
@@ -273,7 +281,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	// reiceived info from leader
-	if args.Term > rf.currentTerm {
+	if args.Term > rf.CurrentTerm {
 		rf.convertToFollower(args.Term)
 	}
 	// change server state to follower because received info from new leader
@@ -288,8 +296,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// 有没有可能出现相同index，相同term，但是内容不同？
 		// 不可能，Log Matching Property保证了这一点
 		// 通俗的理解就是，这个term都是由同一个leader发的，不可能不同
-		if args.PrevLogIndex <= len(rf.log)-1 &&
-			rf.log[args.PrevLogIndex].Term == args.PrevLogTerm {
+		if args.PrevLogIndex <= len(rf.Log)-1 &&
+			rf.Log[args.PrevLogIndex].Term == args.PrevLogTerm {
 
 			// discover same index and same term, accept appendEntries RPC
 			reply.Success = true
@@ -299,15 +307,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// 不会覆盖别的请求的结果
 			if rf.lastNewEntryIndex <= args.PrevLogIndex {
 				// append logs, discard conflict logs
-				// if len(rf.log)-1 >= args.PrevLogIndex+len(args.Entries) {
+				// if len(rf.Log)-1 >= args.PrevLogIndex+len(args.Entries) {
 				// 	for i, e := range args.Entries {
-				// 		rf.log[args.PrevLogIndex+i+1] = e
+				// 		rf.Log[args.PrevLogIndex+i+1] = e
 				// 	}
 				// } else {
-				// 	rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+				// 	rf.Log = append(rf.Log[:args.PrevLogIndex+1], args.Entries...)
 				// }
 
-				// Attention: "lastNewEntryIndex = len(rf.log) - 1"这种写法有问题，
+				// Attention: "lastNewEntryIndex = len(rf.Log) - 1"这种写法有问题，
 				// log里可能包含错误的条目导致长度上不对
 				// 之前错是换因为了上面的写法，这里又没写对
 				// rf.lastNewEntryIndex = args.PrevLogIndex + len(args.Entries)
@@ -319,20 +327,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				// 需要加锁以及加上lastNewEntryIndex <= preLogIndex这条判断
 				// 注意这个判断在args.Entries长度>1时需要做相应修改
 				//
-				rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
-				rf.lastNewEntryIndex = len(rf.log) - 1
+				rf.Log = append(rf.Log[:args.PrevLogIndex+1], args.Entries...)
+				rf.lastNewEntryIndex = len(rf.Log) - 1
 				//
 			}
 		}
 	}
 
 	// update commitIndex
-	if args.LeaderCommit > rf.commitIndex {
+	if args.LeaderCommit > rf.CommitIndex {
 		newCommitIndex := args.LeaderCommit
 		if rf.lastNewEntryIndex < newCommitIndex {
 			newCommitIndex = rf.lastNewEntryIndex
 		}
-		rf.commitIndex = newCommitIndex
+		rf.CommitIndex = newCommitIndex
 	}
 }
 
@@ -359,19 +367,19 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 
-	Debug(dTerm, "S%d receive command, state:%v, term: %v, log length:%v, command:%v", rf.me, rf.serverState, rf.currentTerm, len(rf.log), command)
+	Debug(dTerm, "S%d receive command, state:%v, term: %v, log length:%v, command:%v", rf.me, rf.serverState, rf.CurrentTerm, len(rf.Log), command)
 
 	// initialization
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	index := len(rf.log)
-	term := rf.currentTerm
+	index := len(rf.Log)
+	term := rf.CurrentTerm
 	isLeader := (rf.serverState == Leader)
 
 	// append command to log if server believes it is the leader
 	// TODO 需要判断这条command是否已经在log里，防止因为网络原因使得同一条log执行两次吗？
 	if isLeader {
-		rf.log = append(rf.log, LogEntry{term, command})
+		rf.Log = append(rf.Log, LogEntry{term, command})
 	}
 
 	// TODO 非leader要不要把command转发给leader？
@@ -383,8 +391,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // not lock here, check whether get lock before call this func
 func (rf *Raft) convertToFollower(term int) {
 	rf.serverState = Follower
-	rf.currentTerm = term
-	rf.votedFor = -1
+	rf.CurrentTerm = term
+	rf.VotedFor = -1
 	rf.lastNewEntryIndex = 0
 }
 
@@ -392,9 +400,9 @@ func (rf *Raft) convertToFollower(term int) {
 func (rf *Raft) convertToCandidate() {
 	rf.mu.Lock()
 	// increate currentTerm
-	rf.currentTerm++
+	rf.CurrentTerm++
 	// vote for self
-	rf.votedFor = rf.me
+	rf.VotedFor = rf.me
 	// change server state to candidate
 	rf.serverState = Candidate
 	//
@@ -403,14 +411,14 @@ func (rf *Raft) convertToCandidate() {
 	//
 	var voteCnt int32 = 1
 	requestVoteArgs := RequestVoteArgs{
-		Term:         rf.currentTerm,
+		Term:         rf.CurrentTerm,
 		CandidateId:  rf.me,
-		LastLogIndex: len(rf.log) - 1,
-		LastLogTerm:  rf.log[len(rf.log)-1].Term,
+		LastLogIndex: len(rf.Log) - 1,
+		LastLogTerm:  rf.Log[len(rf.Log)-1].Term,
 	}
 	rf.mu.Unlock()
 
-	Debug(dVote, "S%d start election, currentTerm:%d", rf.me, rf.currentTerm)
+	Debug(dVote, "S%d start election, currentTerm:%d", rf.me, rf.CurrentTerm)
 
 	// TODO 这样写要等所有的request返回，但实际上只需要majority vote 就可以确定了
 	// 现在是用一个goroutine实现的election，有没有可能同时有两个goroutine卡在这个位置，
@@ -449,7 +457,7 @@ func (rf *Raft) convertToCandidate() {
 				Debug(dVote, "S%d <- S%d, requestVote reply:%v", rf.me, server, reply)
 
 				rf.mu.Lock()
-				if reply.Term > rf.currentTerm {
+				if reply.Term > rf.CurrentTerm {
 					rf.convertToFollower(reply.Term)
 				}
 				rf.mu.Unlock()
@@ -498,7 +506,7 @@ func (rf *Raft) convertToLeader() {
 	rf.mu.Lock()
 	for i := range rf.peers {
 		// initialized to leader last log index + 1
-		rf.nextIndex[i] = len(rf.log)
+		rf.nextIndex[i] = len(rf.Log)
 		// initialized to 0
 		rf.matchIndex[i] = 0
 	}
@@ -574,12 +582,12 @@ func (rf *Raft) convertToLeader() {
 		})
 
 		Debug(dInfo, "S%d, logLength:%v term: %v, nextIndex:%v, matchIndex:%v, arr: %v, mIndex:%v",
-			rf.me, len(rf.log), rf.currentTerm, rf.nextIndex, rf.matchIndex, arr, mIndex)
+			rf.me, len(rf.Log), rf.CurrentTerm, rf.nextIndex, rf.matchIndex, arr, mIndex)
 
 		rf.mu.Lock()
-		if newCommitIndex := arr[mIndex]; newCommitIndex > rf.commitIndex &&
-			rf.log[newCommitIndex].Term == rf.currentTerm {
-			rf.commitIndex = newCommitIndex
+		if newCommitIndex := arr[mIndex]; newCommitIndex > rf.CommitIndex &&
+			rf.Log[newCommitIndex].Term == rf.CurrentTerm {
+			rf.CommitIndex = newCommitIndex
 		}
 		rf.mu.Unlock()
 	}
@@ -591,12 +599,12 @@ func (rf *Raft) sendHeartbeat(server int) {
 	// TODO heartbeat里prevlogindex和prevlogterm应该可以随便设，反正没用
 	// 设了效率会高一点，更新nextIndex
 	appendEntriesArgs := AppendEntriesArgs{
-		Term:         rf.currentTerm,
+		Term:         rf.CurrentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: 0,
 		PrevLogTerm:  0,
 		Entries:      []LogEntry{},
-		LeaderCommit: rf.commitIndex,
+		LeaderCommit: rf.CommitIndex,
 	}
 	rf.mu.Unlock()
 
@@ -605,7 +613,7 @@ func (rf *Raft) sendHeartbeat(server int) {
 	if rf.sendAppendEntries(server, &appendEntriesArgs, &reply) {
 		rf.mu.Lock()
 		Debug(dTimer, "S%d <- S%d, receive Heartbeat Response: %v", rf.me, server, reply)
-		if reply.Term > rf.currentTerm {
+		if reply.Term > rf.CurrentTerm {
 			rf.convertToFollower(reply.Term)
 		}
 		rf.mu.Unlock()
@@ -622,7 +630,7 @@ func (rf *Raft) checkAppendEntries(server int) {
 	for {
 		rf.mu.Lock()
 		// no need to append entries or isn't leader, break
-		if len(rf.log)-1 < rf.nextIndex[server] || rf.serverState != Leader {
+		if len(rf.Log)-1 < rf.nextIndex[server] || rf.serverState != Leader {
 			rf.mu.Unlock()
 			break
 		}
@@ -631,12 +639,12 @@ func (rf *Raft) checkAppendEntries(server int) {
 
 		// TODO 一次性发送多个？现在暂时是一次发送一个
 		args := AppendEntriesArgs{
-			Term:         rf.currentTerm,
+			Term:         rf.CurrentTerm,
 			LeaderId:     rf.me,
 			PrevLogIndex: rf.nextIndex[server] - 1,
-			PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
-			Entries:      []LogEntry{rf.log[rf.nextIndex[server]]},
-			LeaderCommit: rf.commitIndex,
+			PrevLogTerm:  rf.Log[rf.nextIndex[server]-1].Term,
+			Entries:      []LogEntry{rf.Log[rf.nextIndex[server]]},
+			LeaderCommit: rf.CommitIndex,
 		}
 		rf.mu.Unlock()
 
@@ -650,7 +658,7 @@ func (rf *Raft) checkAppendEntries(server int) {
 
 		rf.mu.Lock()
 		// discover new leader
-		if reply.Term > rf.currentTerm {
+		if reply.Term > rf.CurrentTerm {
 			rf.convertToFollower(reply.Term)
 		}
 
@@ -717,7 +725,7 @@ func (rf *Raft) ticker() {
 		sleepTime := rand.Intn(200) + 200
 		time.Sleep(time.Duration(sleepTime) * time.Millisecond)
 		Debug(dInfo, "S%d ticker, killed:%v, state: %v, term: %v, logLength: %v, commitIndex:%v, lastApplied:%v, lastNewEntryIndex:%v",
-			rf.me, rf.killed(), rf.serverState, rf.currentTerm, len(rf.log), rf.commitIndex, rf.lastApplied, rf.lastNewEntryIndex)
+			rf.me, rf.killed(), rf.serverState, rf.CurrentTerm, len(rf.Log), rf.CommitIndex, rf.LastApplied, rf.lastNewEntryIndex)
 		if _, isLeader := rf.GetState(); !isLeader && rf.electionTimeout {
 			go rf.convertToCandidate()
 		}
@@ -728,17 +736,17 @@ func (rf *Raft) updateLastApplied(applyCh chan ApplyMsg) {
 	for rf.killed() == false {
 		time.Sleep(20 * time.Millisecond)
 
-		for rf.lastApplied < rf.commitIndex {
-			rf.lastApplied++
+		for rf.LastApplied < rf.CommitIndex {
+			rf.LastApplied++
 			Debug(dError, "S%d apply log[%d]:%v, lastNewEntryIndex:%v, commitIndex:%v, logLength:%v",
-				rf.me, rf.lastApplied, rf.log[rf.lastApplied], rf.lastNewEntryIndex, rf.commitIndex, len(rf.log))
+				rf.me, rf.LastApplied, rf.Log[rf.LastApplied], rf.lastNewEntryIndex, rf.CommitIndex, len(rf.Log))
 			applyMsg := ApplyMsg{
 				CommandValid: true,
-				Command:      rf.log[rf.lastApplied].Command,
-				CommandIndex: rf.lastApplied,
+				Command:      rf.Log[rf.LastApplied].Command,
+				CommandIndex: rf.LastApplied,
 			}
 			applyCh <- applyMsg
-			// Debug(dError, "S%d apply log[%d]:%v Succeed.", rf.me, rf.lastApplied, rf.log[rf.lastApplied])
+			// Debug(dError, "S%d apply log[%d]:%v Succeed.", rf.me, rf.LastApplied, rf.Log[rf.LastApplied])
 		}
 	}
 }
@@ -764,15 +772,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// TODO Your initialization code here (2A, 2B, 2C).
 	// check whether all variables are initialized
 	rf.serverState = Follower
-	rf.currentTerm = 0
-	rf.votedFor = -1
+	rf.CurrentTerm = 0
+	rf.VotedFor = -1
 	rf.lastNewEntryIndex = 0
-	rf.log = make([]LogEntry, 1)
-	rf.log[0].Term = 0
+	rf.Log = make([]LogEntry, 1)
+	rf.Log[0].Term = 0
 
 	// 开一个定时器检查是否有需要apply到service的log entry(lastApplied < commitIndex)
-	rf.commitIndex = 0
-	rf.lastApplied = 0
+	rf.CommitIndex = 0
+	rf.LastApplied = 0
 	go rf.updateLastApplied(applyCh)
 
 	// TODO 如果server数目会改变，这样写就有问题了
