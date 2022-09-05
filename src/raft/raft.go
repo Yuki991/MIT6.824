@@ -316,6 +316,10 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int  // currentTerm, for "leader" to update itself
 	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+
+	// 为了让leader快速定位follower的log entries从哪里开始缺了，额外加上的一个字段
+	// 按照论文里说的应该是不需要的，实际情况中不会出现server经常挂掉以及log里出现大量的不一致
+	PossibleIndex int // follower向leader返回可能的nextIndex，-1表示follower没有requestArgs中的index对应的term的数据
 }
 
 // AppendEntries handler
@@ -357,31 +361,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// 加了一条lastNewEntryIndex <= args.PrevLogIndex
 			// 能够保在接受相同index的appendEntries RPC请求的时候
 			// 不会覆盖别的请求的结果
-			if rf.lastNewEntryIndex <= args.PrevLogIndex {
-				// append logs, discard conflict logs
-				// if len(rf.Log)-1 >= args.PrevLogIndex+len(args.Entries) {
-				// 	for i, e := range args.Entries {
-				// 		rf.Log[args.PrevLogIndex+i+1] = e
-				// 	}
-				// } else {
-				// 	rf.Log = append(rf.Log[:args.PrevLogIndex+1], args.Entries...)
-				// }
-
-				// Attention: "lastNewEntryIndex = len(rf.Log) - 1"这种写法有问题，
-				// log里可能包含错误的条目导致长度上不对
-				// 之前错是换因为了上面的写法，这里又没写对
-				// rf.lastNewEntryIndex = args.PrevLogIndex + len(args.Entries)
-
-				//
-				// Attention: 仔细想想这个写法会出什么问题
-				// 旧的goroutine会扔掉新的goroutine的结果
-				// 新的routine添加了index2和3，然后旧的routine添加2，把3扔掉了
-				// 需要加锁以及加上lastNewEntryIndex <= preLogIndex这条判断
-				// 注意这个判断在args.Entries长度>1时需要做相应修改
-				//
+			if rf.lastNewEntryIndex < args.PrevLogIndex+len(args.Entries) {
+				// 这个可以写得漂亮一点，比如如果还有空位的话就先复制到空位上（记得要把剩余的空位都扔掉）
 				rf.Log = append(rf.Log[:args.PrevLogIndex+1], args.Entries...)
-				rf.lastNewEntryIndex = len(rf.Log) - 1
-				//
+
+				Debug(dError, "S%d change log, logLength:%v, lastNewEntryIndex:%v, prevLogIndex:%v, entriesLength:%v, log:%v", rf.me, len(rf.Log), rf.lastNewEntryIndex, args.PrevLogIndex, len(args.Entries), rf.Log)
+
+				// update last new entry index
+				rf.lastNewEntryIndex = args.PrevLogIndex + len(args.Entries)
 
 				// 持久化，rf.log发生了变化
 				rf.persist()
@@ -396,6 +383,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			newCommitIndex = rf.lastNewEntryIndex
 		}
 		rf.CommitIndex = newCommitIndex
+	}
+
+	// 加快nextIndex收敛
+	if args.PrevLogIndex > len(rf.Log)-1 {
+		// nextIndex至多为last log entry index + 1
+		reply.PossibleIndex = len(rf.Log)
+	} else if rf.Log[args.PrevLogIndex].Term > args.PrevLogTerm {
+		// 如果follower的在某个index上的term大于leader对应位置上的term
+		// 说明follower这个term的所有数据肯定都可以删了（这个term上的数据肯定是不一致的）
+		reply.PossibleIndex = args.PrevLogIndex
+		for rf.Log[reply.PossibleIndex].Term > args.PrevLogTerm {
+			reply.PossibleIndex--
+		}
+	} else if rf.Log[args.PrevLogIndex].Term < args.PrevLogTerm {
+		// 如果follower的在某个index上的term小于leader对应位置上的term
+		// 说明leader在这个term上的数据follower都没有
+		// 返回-1表示follower没有PrevLogTerm这个term的数据
+		reply.PossibleIndex = -1
+	} else {
+		// prevLogIndex上的数据也没有
+		reply.PossibleIndex = args.PrevLogIndex
 	}
 }
 
@@ -434,6 +442,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// append command to log if server believes it is the leader
 	// TODO 需要判断这条command是否已经在log里，防止因为网络原因使得同一条log执行两次吗？
 	if isLeader && !rf.killed() {
+		Debug(dLeader, "S%d receive command", rf.me)
 		rf.Log = append(rf.Log, LogEntry{term, command})
 		rf.persist()
 	}
@@ -587,7 +596,7 @@ func (rf *Raft) convertToLeader() {
 			// send message to channel periodically
 			go func() {
 				// 限制goroutine个数
-				// ch := make(chan struct{}, 10)
+				ch := make(chan struct{}, 40)
 				for {
 					// TODO 每隔一段时间发送心跳包，间隔设多少？
 					if rf.serverState != Leader || rf.killed() {
@@ -597,10 +606,10 @@ func (rf *Raft) convertToLeader() {
 					// TODO 这个可能会出问题，比如一直阻塞但是一直在开goroutine，然后爆了
 					// 不开goroutine就可能会导致之前的一直阻塞，发不了新的
 					// 讲道理这个调用如果一段时间没有结束应该直接返回才对
-					// ch <- struct{}{}
+					ch <- struct{}{}
 					go func() {
 						rf.sendHeartbeat(server)
-						// <-ch
+						<-ch
 					}()
 
 					// TODO election timeout和heartbeat interval 有问题
@@ -645,8 +654,8 @@ func (rf *Raft) convertToLeader() {
 			return arr[i] > arr[j]
 		})
 
-		//Debug(dInfo, "S%d, ads:%v, state:%v, logLength:%v term: %v, nextIndex:%v, matchIndex:%v, arr: %v, mIndex:%v",
-		// rf.me, &rf, rf.serverState, len(rf.Log), rf.CurrentTerm, rf.nextIndex, rf.matchIndex, arr, mIndex)
+		Debug(dInfo, "S%d, ads:%v, state:%v, logLength:%v term: %v, nextIndex:%v, matchIndex:%v, arr: %v, mIndex:%v, log:%v",
+			rf.me, &rf, rf.serverState, len(rf.Log), rf.CurrentTerm, rf.nextIndex, rf.matchIndex, arr, mIndex, rf.Log)
 
 		rf.mu.Lock()
 		if newCommitIndex := arr[mIndex]; newCommitIndex > rf.CommitIndex &&
@@ -673,8 +682,8 @@ func (rf *Raft) sendHeartbeat(server int) {
 	rf.mu.Unlock()
 
 	reply := AppendEntriesReply{}
-	//Debug(dTimer, "S%d <- S%d, send Heartbeat: %v", server, rf.me, appendEntriesArgs)
-	Debug(dError, "S%d -> S%d send heartbeat", rf.me, server)
+	// Debug(dTimer, "S%d <- S%d, send Heartbeat: %v", server, rf.me, appendEntriesArgs)
+	// Debug(dError, "S%d -> S%d send heartbeat", rf.me, server)
 	if rf.sendAppendEntries(server, &appendEntriesArgs, &reply) {
 		rf.mu.Lock()
 		//Debug(dTimer, "S%d <- S%d, receive Heartbeat Response: %v", rf.me, server, reply)
@@ -692,6 +701,9 @@ func (rf *Raft) checkAppendEntries(server int) {
 	// 比如有K个routine尝试在index=3之后加东西，如果成功的话，全部都会成功...
 	// 然后就导致nextIndex这些都出错了
 	///////////////////////////////////////////////////////////////
+
+	// 标识上一个AppendEntries成功
+	accpetFlag := false
 	for {
 		rf.mu.Lock()
 		// no need to append entries or isn't leader, break
@@ -711,9 +723,20 @@ func (rf *Raft) checkAppendEntries(server int) {
 			LeaderId:     rf.me,
 			PrevLogIndex: rf.nextIndex[server] - 1,
 			PrevLogTerm:  rf.Log[rf.nextIndex[server]-1].Term,
-			Entries:      []LogEntry{rf.Log[rf.nextIndex[server]]},
+			Entries:      []LogEntry{},
 			LeaderCommit: rf.CommitIndex,
 		}
+
+		if accpetFlag {
+			// 上一个AppendEntreis成功，尝试将log中prevlogindex后面的所有entries都发送出去
+			args.Entries = make([]LogEntry, len(rf.Log)-args.PrevLogIndex-1)
+			copy(args.Entries, rf.Log[args.PrevLogIndex+1:])
+		} else {
+			// 只发送一个log entries
+			args.Entries = make([]LogEntry, 1)
+			args.Entries[0] = rf.Log[args.PrevLogIndex+1]
+		}
+
 		rf.mu.Unlock()
 
 		reply := AppendEntriesReply{}
@@ -736,13 +759,27 @@ func (rf *Raft) checkAppendEntries(server int) {
 			if args.PrevLogIndex+len(args.Entries)+1 > rf.nextIndex[server] {
 				rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
 				rf.matchIndex[server] = rf.nextIndex[server] - 1
+				accpetFlag = true
 			}
 		} else {
-			// TODO 这里的多个请求到底怎么处理比较好
 			if args.PrevLogIndex+1 == rf.nextIndex[server] {
-				rf.nextIndex[server]--
+				// rf.nextIndex[server]--
+
+				// follower返回PossibleIndex告诉leader可能的nextIndex，加快收敛
+				if reply.PossibleIndex == -1 {
+					// follower没有这PrevLogTerm这个term的数据
+					i := args.PrevLogIndex
+					for rf.Log[i].Term == rf.Log[args.PrevLogIndex].Term {
+						i--
+					}
+					rf.nextIndex[server] = i + 1
+				} else {
+					rf.nextIndex[server] = reply.PossibleIndex
+				}
+				accpetFlag = false
 			} else {
-				// 别的routine已经成功返回
+				// 别的routine已经成功返回，直接退出，unlock()释放
+				rf.mu.Unlock()
 				break
 			}
 		}
@@ -793,8 +830,8 @@ func (rf *Raft) ticker() {
 
 		sleepTime := rand.Intn(200) + 200
 		time.Sleep(time.Duration(sleepTime) * time.Millisecond)
-		//Debug(dInfo, "S%d ticker, ads:%v, killed:%v, state: %v, term: %v, logLength: %v, commitIndex:%v, lastApplied:%v, lastNewEntryIndex:%v",
-		// rf.me, &rf, rf.killed(), rf.serverState, rf.CurrentTerm, len(rf.Log), rf.CommitIndex, rf.LastApplied, rf.lastNewEntryIndex)
+		Debug(dInfo, "S%d ticker, ads:%v, killed:%v, state: %v, term: %v, logLength: %v, commitIndex:%v, lastApplied:%v, lastNewEntryIndex:%v",
+			rf.me, &rf, rf.killed(), rf.serverState, rf.CurrentTerm, len(rf.Log), rf.CommitIndex, rf.LastApplied, rf.lastNewEntryIndex)
 		if _, isLeader := rf.GetState(); !isLeader && rf.electionTimeout {
 			go rf.convertToCandidate()
 		}
@@ -805,20 +842,32 @@ func (rf *Raft) updateLastApplied(applyCh chan ApplyMsg) {
 	for rf.killed() == false {
 		time.Sleep(20 * time.Millisecond)
 
-		for rf.LastApplied < rf.CommitIndex {
+		for {
+			rf.mu.Lock()
+			if rf.LastApplied >= rf.CommitIndex {
+				rf.mu.Unlock()
+				break
+			}
+
 			rf.LastApplied++
-			//Debug(dError, "S%d apply log[%d]:%v, lastNewEntryIndex:%v, commitIndex:%v, logLength:%v",
-			// rf.me, rf.LastApplied, rf.Log[rf.LastApplied], rf.lastNewEntryIndex, rf.CommitIndex, len(rf.Log))
+			Debug(dError, "S%d apply log[%d]:%v, lastNewEntryIndex:%v, commitIndex:%v, logLength:%v",
+				rf.me, rf.LastApplied, rf.Log[rf.LastApplied], rf.lastNewEntryIndex, rf.CommitIndex, len(rf.Log))
 			applyMsg := ApplyMsg{
 				CommandValid: true,
 				Command:      rf.Log[rf.LastApplied].Command,
 				CommandIndex: rf.LastApplied,
 			}
+			rf.mu.Unlock()
+
 			applyCh <- applyMsg
+
 			// TODO 这个怎么感觉放哪都不对，放applyCh <- applyMsg前面的话，在前面挂了就少apply了一条
 			// 放后面的话，applyCh那里挂了就会多放一次，，所以这个last applied就是不应该持久化，
 			// 应该是application告诉Raft当前的appliedIndex是多少
+			rf.mu.Lock()
 			rf.persist()
+			rf.mu.Unlock()
+
 			// //Debug(dError, "S%d apply log[%d]:%v Succeed.", rf.me, rf.LastApplied, rf.Log[rf.LastApplied])
 		}
 	}

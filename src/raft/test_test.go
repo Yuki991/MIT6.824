@@ -568,7 +568,6 @@ func TestBackup2B(t *testing.T) {
 		cfg.connect(i)
 	}
 	cfg.one(rand.Int(), servers, true)
-
 	cfg.end()
 }
 
