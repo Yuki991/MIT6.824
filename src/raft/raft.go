@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"math/rand"
 	"sort"
 	"sync"
@@ -28,6 +29,7 @@ import (
 
 	//	"6.824/labgob"
 
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -116,7 +118,7 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	// Your code here (2C).
+	// TODO Your code here (2C).
 	// Example:
 	// w := new(bytes.Buffer)
 	// e := labgob.NewEncoder(w)
@@ -125,15 +127,36 @@ func (rf *Raft) persist() {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
+	//Debug(dPersist, "S%d save, currentTerm:%v, votedFor:%v, lastApplied:%v, log:%v",
+	// rf.me, rf.CurrentTerm, rf.VotedFor, rf.LastApplied, rf.Log)
+
+	/////////////////////////////////////////////////////////
+	// TODO 还需要在所有修改了需要持久化的state的地方加上persist调用
+	/////////////////////////////////////////////////////////
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.CurrentTerm)
+	e.Encode(rf.VotedFor)
+	e.Encode(rf.Log)
+	e.Encode(rf.LastApplied)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
+	// TODO
 	if data == nil || len(data) < 1 { // bootstrap without any state?
+		rf.CurrentTerm = 0
+		rf.VotedFor = -1
+		rf.Log = make([]LogEntry, 1)
+		rf.Log[0].Term = 0
+		rf.CommitIndex = 0
+		rf.LastApplied = 0
+		//Debug(dPersist, "S%d read, currentTerm:%v, votedFor:%v, lastApplied:%v, log:%v",
+		// rf.me, rf.CurrentTerm, rf.VotedFor, rf.LastApplied, rf.Log)
 		return
 	}
 	// Your code here (2C).
@@ -150,6 +173,33 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.yyy = yyy
 	// }
 
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm, votedFor, lastApplied int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil ||
+		d.Decode(&lastApplied) != nil {
+		// TODO Error了要做何处理？
+		//Debug(dError, "S%d read persist error.", rf.me)
+		rf.CurrentTerm = 0
+		rf.VotedFor = -1
+		rf.Log = make([]LogEntry, 1)
+		rf.Log[0].Term = 0
+		rf.CommitIndex = 0
+		rf.LastApplied = 0
+	} else {
+		rf.CurrentTerm = currentTerm
+		rf.VotedFor = votedFor
+		rf.Log = log
+		// TODO lastApplied实际上不应该被持久化
+		rf.LastApplied = lastApplied
+		rf.CommitIndex = rf.LastApplied
+	}
+
+	//Debug(dPersist, "S%d read, currentTerm:%v, votedFor:%v, lastApplied:%v, log:%v",
+	// rf.me, rf.CurrentTerm, rf.VotedFor, rf.LastApplied, rf.Log)
 }
 
 //
@@ -196,7 +246,7 @@ type RequestVoteReply struct {
 
 // RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	Debug(dVote, "S%d <- S%d, receive requestVote: %v", rf.me, args.CandidateId, args)
+	//Debug(dVote, "S%d <- S%d, receive requestVote: %v", rf.me, args.CandidateId, args)
 	// Your code here (2A, 2B).
 	reply.Term = rf.CurrentTerm
 	reply.VoteGranted = false
@@ -215,6 +265,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// vote for candidate
 		reply.VoteGranted = true
 		rf.VotedFor = args.CandidateId
+		// TODO 这样写的话前面convertToFollower会persist一次，这里又persist一次，好蠢呀
+		rf.persist()
 	}
 }
 
@@ -268,7 +320,7 @@ type AppendEntriesReply struct {
 
 // AppendEntries handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	Debug(dLeader, "S%d <- S%d, receive AppendEntries RPC: %v", rf.me, args.LeaderId, args)
+	//Debug(dLeader, "S%d <- S%d, receive AppendEntries RPC: %v", rf.me, args.LeaderId, args)
 
 	reply.Term = rf.CurrentTerm
 	reply.Success = false
@@ -330,6 +382,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.Log = append(rf.Log[:args.PrevLogIndex+1], args.Entries...)
 				rf.lastNewEntryIndex = len(rf.Log) - 1
 				//
+
+				// 持久化，rf.log发生了变化
+				rf.persist()
 			}
 		}
 	}
@@ -367,7 +422,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 
-	Debug(dTerm, "S%d receive command, state:%v, term: %v, log length:%v, command:%v", rf.me, rf.serverState, rf.CurrentTerm, len(rf.Log), command)
+	//Debug(dTerm, "S%d receive command, state:%v, term: %v, log length:%v, command:%v", rf.me, rf.serverState, rf.CurrentTerm, len(rf.Log), command)
 
 	// initialization
 	rf.mu.Lock()
@@ -378,8 +433,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// append command to log if server believes it is the leader
 	// TODO 需要判断这条command是否已经在log里，防止因为网络原因使得同一条log执行两次吗？
-	if isLeader {
+	if isLeader && !rf.killed() {
 		rf.Log = append(rf.Log, LogEntry{term, command})
+		rf.persist()
 	}
 
 	// TODO 非leader要不要把command转发给leader？
@@ -394,6 +450,7 @@ func (rf *Raft) convertToFollower(term int) {
 	rf.CurrentTerm = term
 	rf.VotedFor = -1
 	rf.lastNewEntryIndex = 0
+	rf.persist()
 }
 
 // time out, conver follower to candidate and start election
@@ -405,6 +462,8 @@ func (rf *Raft) convertToCandidate() {
 	rf.VotedFor = rf.me
 	// change server state to candidate
 	rf.serverState = Candidate
+	// 持久化
+	rf.persist()
 	//
 	// reset election timer，这个到底应该怎么做
 	// ticker开goroutine执行convertToCandidate，不需要重置这个操作
@@ -418,7 +477,7 @@ func (rf *Raft) convertToCandidate() {
 	}
 	rf.mu.Unlock()
 
-	Debug(dVote, "S%d start election, currentTerm:%d", rf.me, rf.CurrentTerm)
+	//Debug(dVote, "S%d start election, currentTerm:%d", rf.me, rf.CurrentTerm)
 
 	// TODO 这样写要等所有的request返回，但实际上只需要majority vote 就可以确定了
 	// 现在是用一个goroutine实现的election，有没有可能同时有两个goroutine卡在这个位置，
@@ -448,13 +507,14 @@ func (rf *Raft) convertToCandidate() {
 
 		go func(server int) {
 			reply := RequestVoteReply{}
-			Debug(dTimer, "S%d <- S%d, requestVote request:%v", server, rf.me, requestVoteArgs)
+			//Debug(dTimer, "S%d <- S%d, requestVote request:%v", server, rf.me, requestVoteArgs)
 			// 没仔细看labrpc里network的实现
 			// 这里的sendRequestVote跟它描述的不太一致，如果target server宕机了，会被阻塞住
 			// 而不是过一段时间会返回（也有可能是它设置的timeout太长了）
 			// 总之如果用waitGroup等等所有的routine结束就会出问题（明明收到半数以上的票却不能结束）
+			Debug(dInfo, "S%d -> S%d send request vote", rf.me, server)
 			if rf.sendRequestVote(server, &requestVoteArgs, &reply) {
-				Debug(dVote, "S%d <- S%d, requestVote reply:%v", rf.me, server, reply)
+				//Debug(dVote, "S%d <- S%d, requestVote reply:%v", rf.me, server, reply)
 
 				rf.mu.Lock()
 				if reply.Term > rf.CurrentTerm {
@@ -473,7 +533,7 @@ func (rf *Raft) convertToCandidate() {
 	// wait for election finished
 	<-done
 
-	Debug(dTimer, "S%d election voting finished, voteCnt:%d, state:%v", rf.me, voteCnt, rf.serverState)
+	//Debug(dTimer, "S%d election voting finished, voteCnt:%d, state:%v", rf.me, voteCnt, rf.serverState)
 
 	// 保证只有一个election goroutine能执行convertToLeader
 	rf.mu.Lock()
@@ -500,7 +560,7 @@ func (rf *Raft) convertToLeader() {
 	// of matchIndex[i] >= N, and log[N].term == currentTerm:
 	// set commitIndex = N
 
-	Debug(dLeader, "S%d become leader", rf.me)
+	//Debug(dLeader, "S%d become leader", rf.me)
 
 	// initialize nextIndex and matchIndex
 	rf.mu.Lock()
@@ -520,27 +580,31 @@ func (rf *Raft) convertToLeader() {
 		}
 
 		go func(server int) {
-			rf.sendHeartbeat(server)
+			// 这句是有问题的，刚成为leader准备发第一个heartbeat，然后对方挂了
+			// 结果就会卡死在这里
+			// rf.sendHeartbeat(server)
 
 			// send message to channel periodically
 			go func() {
 				// 限制goroutine个数
-				ch := make(chan struct{}, 10)
+				// ch := make(chan struct{}, 10)
 				for {
 					// TODO 每隔一段时间发送心跳包，间隔设多少？
-					time.Sleep(150 * time.Millisecond)
-					if rf.serverState != Leader {
+					if rf.serverState != Leader || rf.killed() {
 						break
 					}
 
 					// TODO 这个可能会出问题，比如一直阻塞但是一直在开goroutine，然后爆了
 					// 不开goroutine就可能会导致之前的一直阻塞，发不了新的
 					// 讲道理这个调用如果一段时间没有结束应该直接返回才对
-					ch <- struct{}{}
+					// ch <- struct{}{}
 					go func() {
 						rf.sendHeartbeat(server)
+						// <-ch
 					}()
-					<-ch
+
+					// TODO election timeout和heartbeat interval 有问题
+					time.Sleep(150 * time.Millisecond)
 				}
 			}()
 
@@ -549,15 +613,15 @@ func (rf *Raft) convertToLeader() {
 			for {
 				// 每隔一段时间检查是否需要append entries
 				time.Sleep(20 * time.Millisecond)
-				if rf.serverState != Leader {
+				if rf.serverState != Leader || rf.killed() {
 					break
 				}
 
 				ch <- struct{}{}
 				go func() {
 					rf.checkAppendEntries(server)
+					<-ch
 				}()
-				<-ch
 			}
 		}(i)
 	}
@@ -566,7 +630,7 @@ func (rf *Raft) convertToLeader() {
 		// 每隔一段时间检查是否还担任leader
 		time.Sleep(10 * time.Millisecond)
 
-		if rf.serverState != Leader {
+		if rf.serverState != Leader || rf.killed() {
 			break
 		}
 
@@ -581,8 +645,8 @@ func (rf *Raft) convertToLeader() {
 			return arr[i] > arr[j]
 		})
 
-		Debug(dInfo, "S%d, logLength:%v term: %v, nextIndex:%v, matchIndex:%v, arr: %v, mIndex:%v",
-			rf.me, len(rf.Log), rf.CurrentTerm, rf.nextIndex, rf.matchIndex, arr, mIndex)
+		//Debug(dInfo, "S%d, ads:%v, state:%v, logLength:%v term: %v, nextIndex:%v, matchIndex:%v, arr: %v, mIndex:%v",
+		// rf.me, &rf, rf.serverState, len(rf.Log), rf.CurrentTerm, rf.nextIndex, rf.matchIndex, arr, mIndex)
 
 		rf.mu.Lock()
 		if newCommitIndex := arr[mIndex]; newCommitIndex > rf.CommitIndex &&
@@ -609,10 +673,11 @@ func (rf *Raft) sendHeartbeat(server int) {
 	rf.mu.Unlock()
 
 	reply := AppendEntriesReply{}
-	Debug(dTimer, "S%d <- S%d, send Heartbeat: %v", server, rf.me, appendEntriesArgs)
+	//Debug(dTimer, "S%d <- S%d, send Heartbeat: %v", server, rf.me, appendEntriesArgs)
+	Debug(dError, "S%d -> S%d send heartbeat", rf.me, server)
 	if rf.sendAppendEntries(server, &appendEntriesArgs, &reply) {
 		rf.mu.Lock()
-		Debug(dTimer, "S%d <- S%d, receive Heartbeat Response: %v", rf.me, server, reply)
+		//Debug(dTimer, "S%d <- S%d, receive Heartbeat Response: %v", rf.me, server, reply)
 		if reply.Term > rf.CurrentTerm {
 			rf.convertToFollower(reply.Term)
 		}
@@ -630,14 +695,17 @@ func (rf *Raft) checkAppendEntries(server int) {
 	for {
 		rf.mu.Lock()
 		// no need to append entries or isn't leader, break
-		if len(rf.Log)-1 < rf.nextIndex[server] || rf.serverState != Leader {
+		if len(rf.Log)-1 < rf.nextIndex[server] || rf.serverState != Leader || rf.killed() {
 			rf.mu.Unlock()
 			break
 		}
 
-		Debug(dLeader, "S%d -> S%d, try to append entries", rf.me, server)
+		//Debug(dLeader, "S%d -> S%d, try to append entries", rf.me, server)
 
+		////////////////////////////////////////
 		// TODO 一次性发送多个？现在暂时是一次发送一个
+		// 目测多发了很多RPC是因为没有实现一次性发多个
+		///////////////////////////////////////
 		args := AppendEntriesArgs{
 			Term:         rf.CurrentTerm,
 			LeaderId:     rf.me,
@@ -650,7 +718,8 @@ func (rf *Raft) checkAppendEntries(server int) {
 
 		reply := AppendEntriesReply{}
 		// TODO 有没有可能会阻塞在这的？
-		Debug(dLeader, "S%d <- S%d, send AppendEntries RPC: %v", server, rf.me, args)
+		//Debug(dLeader, "S%d <- S%d, send AppendEntries RPC: %v", server, rf.me, args)
+		Debug(dWarn, "S%d -> S%d append entries", rf.me, server)
 		if !rf.sendAppendEntries(server, &args, &reply) {
 			// no response, break
 			break
@@ -677,8 +746,8 @@ func (rf *Raft) checkAppendEntries(server int) {
 				break
 			}
 		}
-		Debug(dLeader, "S%d <- S%d, receive AppendEntries response: %v, nextIndex:%v",
-			rf.me, server, reply, rf.nextIndex)
+		//Debug(dLeader, "S%d <- S%d, receive AppendEntries response: %v, nextIndex:%v",
+		// rf.me, server, reply, rf.nextIndex)
 		rf.mu.Unlock()
 	}
 }
@@ -697,7 +766,7 @@ func (rf *Raft) checkAppendEntries(server int) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	Debug(dWarn, "S%d is killed.", rf.me)
+	//Debug(dWarn, "S%d is killed.", rf.me)
 }
 
 func (rf *Raft) killed() bool {
@@ -724,8 +793,8 @@ func (rf *Raft) ticker() {
 
 		sleepTime := rand.Intn(200) + 200
 		time.Sleep(time.Duration(sleepTime) * time.Millisecond)
-		Debug(dInfo, "S%d ticker, killed:%v, state: %v, term: %v, logLength: %v, commitIndex:%v, lastApplied:%v, lastNewEntryIndex:%v",
-			rf.me, rf.killed(), rf.serverState, rf.CurrentTerm, len(rf.Log), rf.CommitIndex, rf.LastApplied, rf.lastNewEntryIndex)
+		//Debug(dInfo, "S%d ticker, ads:%v, killed:%v, state: %v, term: %v, logLength: %v, commitIndex:%v, lastApplied:%v, lastNewEntryIndex:%v",
+		// rf.me, &rf, rf.killed(), rf.serverState, rf.CurrentTerm, len(rf.Log), rf.CommitIndex, rf.LastApplied, rf.lastNewEntryIndex)
 		if _, isLeader := rf.GetState(); !isLeader && rf.electionTimeout {
 			go rf.convertToCandidate()
 		}
@@ -738,15 +807,19 @@ func (rf *Raft) updateLastApplied(applyCh chan ApplyMsg) {
 
 		for rf.LastApplied < rf.CommitIndex {
 			rf.LastApplied++
-			Debug(dError, "S%d apply log[%d]:%v, lastNewEntryIndex:%v, commitIndex:%v, logLength:%v",
-				rf.me, rf.LastApplied, rf.Log[rf.LastApplied], rf.lastNewEntryIndex, rf.CommitIndex, len(rf.Log))
+			//Debug(dError, "S%d apply log[%d]:%v, lastNewEntryIndex:%v, commitIndex:%v, logLength:%v",
+			// rf.me, rf.LastApplied, rf.Log[rf.LastApplied], rf.lastNewEntryIndex, rf.CommitIndex, len(rf.Log))
 			applyMsg := ApplyMsg{
 				CommandValid: true,
 				Command:      rf.Log[rf.LastApplied].Command,
 				CommandIndex: rf.LastApplied,
 			}
 			applyCh <- applyMsg
-			// Debug(dError, "S%d apply log[%d]:%v Succeed.", rf.me, rf.LastApplied, rf.Log[rf.LastApplied])
+			// TODO 这个怎么感觉放哪都不对，放applyCh <- applyMsg前面的话，在前面挂了就少apply了一条
+			// 放后面的话，applyCh那里挂了就会多放一次，，所以这个last applied就是不应该持久化，
+			// 应该是application告诉Raft当前的appliedIndex是多少
+			rf.persist()
+			// //Debug(dError, "S%d apply log[%d]:%v Succeed.", rf.me, rf.LastApplied, rf.Log[rf.LastApplied])
 		}
 	}
 }
@@ -769,18 +842,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-	// TODO Your initialization code here (2A, 2B, 2C).
+	// Your initialization code here (2A, 2B, 2C).
 	// check whether all variables are initialized
+	// TODO 重启了统一变成follower?
 	rf.serverState = Follower
-	rf.CurrentTerm = 0
-	rf.VotedFor = -1
 	rf.lastNewEntryIndex = 0
-	rf.Log = make([]LogEntry, 1)
-	rf.Log[0].Term = 0
 
 	// 开一个定时器检查是否有需要apply到service的log entry(lastApplied < commitIndex)
-	rf.CommitIndex = 0
-	rf.LastApplied = 0
 	go rf.updateLastApplied(applyCh)
 
 	// TODO 如果server数目会改变，这样写就有问题了

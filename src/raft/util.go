@@ -30,7 +30,7 @@ const (
 )
 
 // Debugging
-const debugFlag = false
+const debugFlag = true
 
 var debugStart time.Time
 var debugVerbosity int
