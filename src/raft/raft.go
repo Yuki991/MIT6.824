@@ -137,7 +137,6 @@ func (rf *Raft) persist() {
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
-	// TODO
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		rf.CurrentTerm = 0
 		rf.VotedFor = -1
@@ -474,10 +473,6 @@ func (rf *Raft) convertToCandidate() {
 
 	//Debug(dVote, "S%d start election, currentTerm:%d", rf.me, rf.CurrentTerm)
 
-	// TODO 这样写要等所有的request返回，但实际上只需要majority vote 就可以确定了
-	// 现在是用一个goroutine实现的election，有没有可能同时有两个goroutine卡在这个位置，
-	// 然后同时到下面的是否选举成功的判断的位置？ 有可能
-
 	// true : 收到一个reply，并且已有半数以上赞同；false: 收到一个reply
 	replyCh := make(chan bool)
 	// 标识election是否结束
@@ -542,19 +537,6 @@ func (rf *Raft) convertToCandidate() {
 
 // candidate convert to leader, start leader work
 func (rf *Raft) convertToLeader() {
-	// Upon election: send initial empty AppendEntries RPCs(heartbeat)
-	// to each server; repeat during idle periods to prevent election timeouts.
-	// TODO If command received from client: append entry to log,
-	// respond after entry applied to state machine
-	// TODO If last log index >= nextIndex for a follower: send
-	// AppendEntries RPC with log entries starting at nextIndex
-	//		if successful: update nextIndex and matchIndex for follower
-	//		if AppendEntries fails because of log inconsistency:
-	//			decrement nextIndex and retry
-	// TODO If there exists an N such that N > commitIndex, a majority
-	// of matchIndex[i] >= N, and log[N].term == currentTerm:
-	// set commitIndex = N
-
 	//Debug(dLeader, "S%d become leader", rf.me)
 
 	// initialize nextIndex and matchIndex
@@ -655,8 +637,6 @@ func (rf *Raft) convertToLeader() {
 // leader send heartbeat to each server
 func (rf *Raft) sendHeartbeat(server int) {
 	rf.mu.Lock()
-	// TODO heartbeat里prevlogindex和prevlogterm应该可以随便设，反正没用
-	// 设了效率会高一点，更新nextIndex
 	args := AppendEntriesArgs{
 		Term:         rf.CurrentTerm,
 		LeaderId:     rf.me,
@@ -839,8 +819,6 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		// TODO How long should the time delay be set
-		// TODO 这种写法会允许存在两个heartbeat之间间隔 > timeout（一个靠前一个靠后）
 		// 有没有办法写成定时器，并且支持重置
 		rf.mu.Lock()
 		// reset timeout flag
@@ -879,14 +857,6 @@ func (rf *Raft) updateLastApplied(applyCh chan ApplyMsg) {
 			rf.mu.Unlock()
 
 			applyCh <- applyMsg
-
-			// TODO 这个怎么感觉放哪都不对，放applyCh <- applyMsg前面的话，在前面挂了就少apply了一条
-			// 放后面的话，applyCh那里挂了就会多放一次，，所以这个last applied就是不应该持久化，
-			// 应该是application告诉Raft当前的appliedIndex是多少
-			rf.mu.Lock()
-			rf.persist()
-			rf.mu.Unlock()
-
 			// //Debug(dError, "S%d apply log[%d]:%v Succeed.", rf.me, rf.LastApplied, rf.Log[rf.LastApplied])
 		}
 	}
@@ -912,7 +882,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	// check whether all variables are initialized
-	// TODO 重启了统一变成follower?
 	rf.serverState = Follower
 	rf.lastNewEntryIndex = 0
 
