@@ -76,9 +76,6 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// persistent state on all servers
-	// TODO 这里有点点争议，现在(2C)是还没有application的，所以没人能告诉我重置的时候
-	// 应该将lastApplie设成是多少，所以暂时先把lastApplied持久化吧...
-	// 至于commitIndex，重启的时候把它设成等于lastApplied肯定没问题
 	CurrentTerm int        // latest term server has seen
 	VotedFor    int        // candidate index that received vote in current term
 	Log         []LogEntry // log entries
@@ -138,7 +135,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VotedFor)
 	e.Encode(rf.Log)
-	e.Encode(rf.LastApplied)
+	// e.Encode(rf.LastApplied)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -153,8 +150,8 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.VotedFor = -1
 		rf.Log = make([]LogEntry, 1)
 		rf.Log[0].Term = 0
-		rf.CommitIndex = 0
-		rf.LastApplied = 0
+		// rf.CommitIndex = 0
+		// rf.LastApplied = 0
 		//Debug(dPersist, "S%d read, currentTerm:%v, votedFor:%v, lastApplied:%v, log:%v",
 		// rf.me, rf.CurrentTerm, rf.VotedFor, rf.LastApplied, rf.Log)
 		return
@@ -175,27 +172,27 @@ func (rf *Raft) readPersist(data []byte) {
 
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	var currentTerm, votedFor, lastApplied int
+	var currentTerm, votedFor int
 	var log []LogEntry
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil ||
-		d.Decode(&lastApplied) != nil {
+		d.Decode(&log) != nil {
 		// TODO Error了要做何处理？
 		//Debug(dError, "S%d read persist error.", rf.me)
 		rf.CurrentTerm = 0
 		rf.VotedFor = -1
 		rf.Log = make([]LogEntry, 1)
 		rf.Log[0].Term = 0
-		rf.CommitIndex = 0
-		rf.LastApplied = 0
 	} else {
 		rf.CurrentTerm = currentTerm
 		rf.VotedFor = votedFor
 		rf.Log = log
-		// TODO lastApplied实际上不应该被持久化
-		rf.LastApplied = lastApplied
-		rf.CommitIndex = rf.LastApplied
+		// lastApplied实际上不应该被持久化
+		// 不需要，如果application没挂，他应该知道哪些command是执行过的
+		// 如果application挂了，它就需要log replay
+		// 还有一种方式是application告诉raft有哪些entries是已经aplied的
+		// rf.LastApplied = lastApplied
+		// rf.CommitIndex = rf.LastApplied
 	}
 
 	//Debug(dPersist, "S%d read, currentTerm:%v, votedFor:%v, lastApplied:%v, log:%v",
@@ -898,6 +895,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastNewEntryIndex = 0
 
 	// 开一个定时器检查是否有需要apply到service的log entry(lastApplied < commitIndex)
+	rf.CommitIndex = 0
+	rf.LastApplied = 0
 	go rf.updateLastApplied(applyCh)
 
 	// TODO 如果server数目会改变，这样写就有问题了
