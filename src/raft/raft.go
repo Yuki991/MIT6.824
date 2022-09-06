@@ -83,11 +83,12 @@ type Raft struct {
 	nextIndex  []int // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
 	matchIndex []int // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
 
-	// TODO auxiliary variables if needed
+	// auxiliary variables if needed
 	electionTimeout   bool        // true means If election timeout elapses without receiving AppendEntries RPC from current leader or granting vote to candidate
 	serverState       ServerState // indicate the current state of server
 	lastNewEntryIndex int         // index of last received from the leader of currentTerm
-	leaderId          int
+	// snapshot          []byte      // 这个不需要存吧，如果installSnapshot需要，可以从stable storage里读取
+	leaderId int // TODO 用于让follower可以转发clinet请求给leader
 }
 
 // return currentTerm and whether this server
@@ -104,27 +105,24 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
+// save raft state and snapshot to stable storage
+func (rf *Raft) saveStateAndSnapshot(snapshot []byte) {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.CurrentTerm)
+	e.Encode(rf.VotedFor)
+	e.Encode(rf.Log)
+	rfState := w.Bytes()
+	rf.persister.SaveStateAndSnapshot(rfState, snapshot)
+}
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	// TODO Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
-
-	//Debug(dPersist, "S%d save, currentTerm:%v, votedFor:%v, lastApplied:%v, log:%v",
-	// rf.me, rf.CurrentTerm, rf.VotedFor, rf.LastApplied, rf.Log)
-
-	/////////////////////////////////////////////////////////
-	// TODO 还需要在所有修改了需要持久化的state的地方加上persist调用
-	/////////////////////////////////////////////////////////
+	// 需要在所有修改了需要持久化的state的地方加上persist调用
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.CurrentTerm)
@@ -148,19 +146,6 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.Log.Log = []LogEntry{}
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
 
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
@@ -180,16 +165,13 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.CurrentTerm = currentTerm
 		rf.VotedFor = votedFor
 		rf.Log = log
-		// lastApplied实际上不应该被持久化
+		// lastApplied不应该被持久化
 		// 不需要，如果application没挂，他应该知道哪些command是执行过的
 		// 如果application挂了，它就需要log replay
 		// 还有一种方式是application告诉raft有哪些entries是已经aplied的
 		// rf.LastApplied = lastApplied
 		// rf.CommitIndex = rf.LastApplied
 	}
-
-	//Debug(dPersist, "S%d read, currentTerm:%v, votedFor:%v, lastApplied:%v, log:%v",
-	// rf.me, rf.CurrentTerm, rf.VotedFor, rf.LastApplied, rf.Log)
 }
 
 //
@@ -198,7 +180,7 @@ func (rf *Raft) readPersist(data []byte) {
 //
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
-	// Your code here (2D).
+	// TODO Your code here (2D).
 
 	return true
 }
@@ -208,8 +190,15 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
+	// TODO Your code here (2D).
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	Debug(dError, "S%d discard log entries before index %d, log:%v", rf.me, index, rf.Log)
+	rf.Log.Discard(index)
+	rf.saveStateAndSnapshot(snapshot)
+	Debug(dError, "S%d finish discard log entries before index %d, log:%v", rf.me, index, rf.Log)
 }
 
 //
@@ -375,29 +364,33 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.CommitIndex = newCommitIndex
 	}
 
-	// 加快nextIndex收敛
-	if args.PrevLogIndex > rf.Log.GetLastEntryIndex() {
-		// nextIndex至多为last log entry index + 1
-		reply.PossibleNextIndex = rf.Log.GetLastEntryIndex() + 1
-	} else if args.PrevLogIndex <= rf.Log.LastIncludedIndex {
-		// 这个应该不可能，应该是过期数据
-		Debug(dError, "S%d receive appendRPC:%v, lastIncludedIndex:%v", rf.me, args, rf.Log.LastIncludedIndex)
-		reply.PossibleNextIndex = rf.Log.GetLastEntryIndex() + 1
-	} else if rf.Log.GetTerm(args.PrevLogIndex) > args.PrevLogTerm {
-		// 如果follower的在某个index上的term大于leader对应位置上的term
-		// 说明follower这个term的所有数据肯定都可以删了（这个term上的数据肯定是不一致的）
-		reply.PossibleNextIndex = rf.Log.GetPrevTermIndex(args.PrevLogIndex)
-		if reply.PossibleNextIndex <= rf.Log.LastIncludedIndex {
-			reply.PossibleNextIndex = rf.Log.LastIncludedIndex + 1
+	if len(args.Entries) > 0 {
+		// 加快nextIndex收敛，heartbeat不处理
+		// TODO 这一段可能有些问题
+		if args.PrevLogIndex > rf.Log.GetLastEntryIndex() {
+			// nextIndex至多为last log entry index + 1
+			reply.PossibleNextIndex = rf.Log.GetLastEntryIndex() + 1
+		} else if args.PrevLogIndex < rf.Log.LastIncludedIndex {
+			// 这个应该不可能，应该是过期数据（除去hearbeat...）
+			// Debug(dError, "S%d receive appendRPC:%v, log:%v", rf.me, args, rf.Log)
+			// panic("error")
+			reply.PossibleNextIndex = rf.Log.GetLastEntryIndex() + 1
+		} else if rf.Log.GetTerm(args.PrevLogIndex) > args.PrevLogTerm {
+			// 如果follower的在某个index上的term大于leader对应位置上的term
+			// 说明follower这个term的所有数据肯定都可以删了（这个term上的数据肯定是不一致的）
+			reply.PossibleNextIndex = rf.Log.GetLessAndEqualTermIndex(args.PrevLogIndex, args.PrevLogTerm)
+			if reply.PossibleNextIndex <= rf.Log.LastIncludedIndex {
+				reply.PossibleNextIndex = rf.Log.LastIncludedIndex + 1
+			}
+		} else if rf.Log.GetTerm(args.PrevLogIndex) < args.PrevLogTerm {
+			// 如果follower的在某个index上的term小于leader对应位置上的term
+			// 说明leader在这个term上的数据follower都没有
+			// 返回-1表示follower没有PrevLogTerm这个term的数据
+			reply.PossibleNextIndex = -1
+		} else {
+			// prevLogIndex上的数据也没有
+			reply.PossibleNextIndex = args.PrevLogIndex
 		}
-	} else if rf.Log.GetTerm(args.PrevLogIndex) < args.PrevLogTerm {
-		// 如果follower的在某个index上的term小于leader对应位置上的term
-		// 说明leader在这个term上的数据follower都没有
-		// 返回-1表示follower没有PrevLogTerm这个term的数据
-		reply.PossibleNextIndex = -1
-	} else {
-		// prevLogIndex上的数据也没有
-		reply.PossibleNextIndex = args.PrevLogIndex
 	}
 }
 
@@ -587,7 +580,7 @@ func (rf *Raft) convertToLeader() {
 			// 结果就会卡死在这里
 			// rf.sendHeartbeat(server)
 
-			// 限制goroutine个数
+			// TODO 限制goroutine个数
 			ch := make(chan struct{}, 40)
 			for {
 				// TODO 每隔一段时间发送心跳包，间隔设多少？
@@ -647,8 +640,8 @@ func (rf *Raft) convertToLeader() {
 			return arr[i] > arr[j]
 		})
 
-		Debug(dInfo, "S%d, ads:%v, state:%v, logLength:%v term: %v, nextIndex:%v, matchIndex:%v, arr: %v, mIndex:%v, log:%v",
-			rf.me, &rf, rf.serverState, rf.Log.GetLastEntryIndex(), rf.CurrentTerm, rf.nextIndex, rf.matchIndex, arr, mIndex, rf.Log)
+		// Debug(dInfo, "S%d, ads:%v, state:%v, logLength:%v term: %v, nextIndex:%v, matchIndex:%v, arr: %v, mIndex:%v, log:%v",
+		// rf.me, &rf, rf.serverState, rf.Log.GetLastEntryIndex(), rf.CurrentTerm, rf.nextIndex, rf.matchIndex, arr, mIndex, rf.Log)
 
 		rf.mu.Lock()
 		if newCommitIndex := arr[mIndex]; newCommitIndex > rf.CommitIndex &&
@@ -696,11 +689,20 @@ func (rf *Raft) checkAppendEntries(server int) {
 	///////////////////////////////////////////////////////////////
 
 	// 标识上一个AppendEntries成功
-	accpetFlag := false
+	// accpetFlag := false
 	for {
 		rf.mu.Lock()
 		// no need to append entries or isn't leader, break
-		if rf.Log.GetLastEntryIndex() < rf.nextIndex[server] || rf.serverState != Leader || rf.killed() {
+		if rf.Log.GetLastEntryIndex() < rf.nextIndex[server] ||
+			rf.serverState != Leader ||
+			rf.killed() {
+			rf.mu.Unlock()
+			break
+		}
+
+		if rf.nextIndex[server] <= rf.Log.LastIncludedIndex {
+			// TODO 这种情况下应该发送InstallSnapshot
+			Debug(dError, "S%d -> S%d, state:%v, nextIndex:%v, log:%v", rf.me, server, rf.serverState, rf.nextIndex, rf.Log)
 			rf.mu.Unlock()
 			break
 		}
@@ -716,23 +718,23 @@ func (rf *Raft) checkAppendEntries(server int) {
 			LeaderCommit: rf.CommitIndex,
 		}
 
-		if accpetFlag {
-			// 上一个AppendEntreis成功，尝试将log中prevlogindex后面的所有entries都发送出去
-			args.Entries = make([]LogEntry, rf.Log.GetLastEntryIndex()-args.PrevLogIndex)
-			copy(args.Entries, rf.Log.GetSlice(args.PrevLogIndex+1, rf.Log.GetLastEntryIndex()+1))
-			// Debug(dError, "S%d prepare append entries, L:%v, R:%v, args:%v, log:%v", rf.me, args.PrevLogIndex+1, rf.Log.GetLastEntryIndex()+1, args, rf.Log)
-		} else {
-			// 只发送一个log entries
-			args.Entries = make([]LogEntry, 1)
-			args.Entries[0] = rf.Log.Get(args.PrevLogIndex + 1)
-		}
+		// if accpetFlag {
+		// 上一个AppendEntreis成功，尝试将log中prevlogindex后面的所有entries都发送出去
+		args.Entries = make([]LogEntry, rf.Log.GetLastEntryIndex()-args.PrevLogIndex)
+		copy(args.Entries, rf.Log.GetSlice(args.PrevLogIndex+1, rf.Log.GetLastEntryIndex()+1))
+		// Debug(dError, "S%d prepare append entries, L:%v, R:%v, args:%v, log:%v", rf.me, args.PrevLogIndex+1, rf.Log.GetLastEntryIndex()+1, args, rf.Log)
+		// } else {
+		// 	// 只发送一个log entries
+		// 	args.Entries = make([]LogEntry, 1)
+		// 	args.Entries[0] = rf.Log.Get(args.PrevLogIndex + 1)
+		// }
 
 		rf.mu.Unlock()
 
 		reply := AppendEntriesReply{}
 		// TODO 有没有可能会阻塞在这的？
 		//Debug(dLeader, "S%d <- S%d, send AppendEntries RPC: %v", server, rf.me, args)
-		Debug(dWarn, "S%d -> S%d append entries", rf.me, server)
+		Debug(dWarn, "S%d -> S%d append entries, args:%v", rf.me, server, args)
 		if !rf.sendAppendEntries(server, &args, &reply) {
 			// no response, break
 			break
@@ -748,7 +750,7 @@ func (rf *Raft) checkAppendEntries(server int) {
 			if args.PrevLogIndex+len(args.Entries)+1 > rf.nextIndex[server] {
 				rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
 				rf.matchIndex[server] = rf.nextIndex[server] - 1
-				accpetFlag = true
+				// accpetFlag = true
 			}
 		} else {
 			if args.PrevLogIndex+1 == rf.nextIndex[server] {
@@ -758,16 +760,16 @@ func (rf *Raft) checkAppendEntries(server int) {
 				if reply.PossibleNextIndex == -1 {
 					// follower没有这PrevLogTerm这个term的数据
 					// 找到第一个index对应的term不等于PrevLogTerm
-					prevTermIndex := rf.Log.GetPrevTermIndex(args.PrevLogIndex)
-					// if prevTermIndex < 0 {
-					// 	// TODO 2D snapshot
-					// 	rf.sendInstallSnapshop()
-					// }
+					prevTermIndex := rf.Log.GetPrevTermIndex(args.PrevLogIndex, args.PrevLogTerm)
+					if prevTermIndex < 0 {
+						// TODO 2D snapshot
+						panic("error")
+					}
 					rf.nextIndex[server] = prevTermIndex + 1
 				} else {
 					rf.nextIndex[server] = reply.PossibleNextIndex
 				}
-				accpetFlag = false
+				// accpetFlag = false
 			} else {
 				// 别的routine已经成功返回，直接退出，unlock()释放
 				rf.mu.Unlock()
@@ -781,11 +783,19 @@ func (rf *Raft) checkAppendEntries(server int) {
 }
 
 type InstallSnapshotArgs struct {
-	// TODO
+	// 注意实现中不打算使用分段发送snapshot，data就是整个snapshot
+	// 所以不需要offset和done字段
+	Term              int    // leader's term
+	LeaderId          int    // so follower can redirect clients
+	LastIncludedIndex int    // the snapshot replaces all entries up through and including this index
+	LastIncludedTerm  int    // term of LastIncludedIndex
+	Data              []byte // raw bytes of the snapshot chunk, starting at offset
+	// Offset            int    // byte offset where chunk is positioned in the snapshot file
+	// Done              bool   // true is this is the last chunk
 }
 
 type InstallSnapshotReply struct {
-	// TODO
+	Term int // currentTerm, for leader to update itself
 }
 
 // install snapshot handler
