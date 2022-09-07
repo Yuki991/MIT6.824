@@ -69,6 +69,15 @@ func (l *Log) Discard(index int) bool {
 	return true
 }
 
+//
+// 丢弃所有的logs，并更新lastIncludedIndex和lastIncludedTerm
+//
+func (l *Log) DiscardAll(lastIncludedIndex, lastIncludedTerm int) {
+	l.Log = []LogEntry{}
+	l.LastIncludedIndex = lastIncludedIndex
+	l.LastIncludedTerm = lastIncludedTerm
+}
+
 // 从index之后append（保留index，后面的全部discard）
 func (l *Log) Append(index int, entries []LogEntry) bool {
 	// fmt.Printf("append: index:%v, lastIncludedIndex:%v, entries:%v, log:%v\n", index, l.LastIncludedIndex, entries, l.Log)

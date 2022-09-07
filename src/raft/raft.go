@@ -84,11 +84,12 @@ type Raft struct {
 	matchIndex []int // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
 
 	// auxiliary variables if needed
-	electionTimeout   bool        // true means If election timeout elapses without receiving AppendEntries RPC from current leader or granting vote to candidate
-	serverState       ServerState // indicate the current state of server
-	lastNewEntryIndex int         // index of last received from the leader of currentTerm
-	// snapshot          []byte      // 这个不需要存吧，如果installSnapshot需要，可以从stable storage里读取
-	leaderId int // TODO 用于让follower可以转发clinet请求给leader
+	applyCh           chan ApplyMsg // channel which is used to send message to service
+	electionTimeout   bool          // true means If election timeout elapses without receiving AppendEntries RPC from current leader or granting vote to candidate
+	serverState       ServerState   // indicate the current state of server
+	lastNewEntryIndex int           // index of last received from the leader of currentTerm
+	snapshot          []byte        // 这个可以不存，如果installSnapshot需要，可以从stable storage里读取。先存着吧，方便
+	leaderId          int           // TODO 用于让follower可以转发clinet请求给leader
 }
 
 // return currentTerm and whether this server
@@ -143,6 +144,9 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.Log.LastIncludedIndex = 0
 		rf.Log.LastIncludedTerm = 0
 		rf.Log.Log = []LogEntry{}
+		rf.snapshot = []byte{}
+		rf.CommitIndex = 0
+		rf.LastApplied = 0
 		return
 	}
 
@@ -160,10 +164,21 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.Log.LastIncludedIndex = 0
 		rf.Log.LastIncludedTerm = 0
 		rf.Log.Log = []LogEntry{}
+		rf.snapshot = []byte{}
+		rf.CommitIndex = 0
+		rf.LastApplied = 0
 	} else {
 		rf.CurrentTerm = currentTerm
 		rf.VotedFor = votedFor
 		rf.Log = log
+		rf.snapshot = rf.persister.ReadSnapshot()
+		// 重启时commitIndex和lastApplied设置为lastIncludedIndex
+		rf.CommitIndex = rf.Log.LastIncludedIndex
+		rf.LastApplied = rf.Log.LastIncludedIndex
+		// TODO 将snapshot发送给service，需要吗，还是说service自己去读？
+		// go func() {
+		// }()
+
 		// lastApplied不应该被持久化
 		// 不需要，如果application没挂，他应该知道哪些command是执行过的
 		// 如果application挂了，它就需要log replay
@@ -189,15 +204,14 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// TODO Your code here (2D).
-
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	Debug(dError, "S%d discard log entries before index %d, log:%v", rf.me, index, rf.Log)
+	// Debug(dError, "S%d discard log entries before index %d, log:%v", rf.me, index, rf.Log)
 	rf.Log.Discard(index)
+	rf.snapshot = snapshot
 	rf.saveStateAndSnapshot(snapshot)
-	Debug(dError, "S%d finish discard log entries before index %d, log:%v", rf.me, index, rf.Log)
+	// Debug(dError, "S%d finish discard log entries before index %d, log:%v", rf.me, index, rf.Log)
 }
 
 //
@@ -205,7 +219,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
 	Term         int // candidate's term
 	CandidateId  int // candidate requesting vote
 	LastLogIndex int // index of candidate's last log entry
@@ -225,15 +238,16 @@ type RequestVoteReply struct {
 // RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//Debug(dVote, "S%d <- S%d, receive requestVote: %v", rf.me, args.CandidateId, args)
-	// Your code here (2A, 2B).
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	reply.Term = rf.CurrentTerm
 	reply.VoteGranted = false
 	if args.Term < rf.CurrentTerm {
 		return
 	}
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	if args.Term > rf.CurrentTerm {
 		rf.convertToFollower(args.Term)
 	}
@@ -304,15 +318,15 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	//Debug(dLeader, "S%d <- S%d, receive AppendEntries RPC: %v", rf.me, args.LeaderId, args)
 
+	// 用defer小心点，有可能会死锁的
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	reply.Term = rf.CurrentTerm
 	reply.Success = false
 	if args.Term < rf.CurrentTerm {
 		return
 	}
-
-	// 用defer小心点，有可能会死锁的
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	// reiceived info from leader
 	if args.Term > rf.CurrentTerm {
@@ -343,7 +357,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if rf.lastNewEntryIndex < args.PrevLogIndex+len(args.Entries) {
 				rf.Log.Append(args.PrevLogIndex, args.Entries)
 
-				Debug(dError, "S%d change log, logLength:%v, lastNewEntryIndex:%v, prevLogIndex:%v, entriesLength:%v, log:%v, args:%v", rf.me, rf.Log.GetLastEntryIndex(), rf.lastNewEntryIndex, args.PrevLogIndex, len(args.Entries), rf.Log, args)
+				// Debug(dError, "S%d change log, logLength:%v, lastNewEntryIndex:%v, prevLogIndex:%v, entriesLength:%v, log:%v, args:%v", rf.me, rf.Log.GetLastEntryIndex(), rf.lastNewEntryIndex, args.PrevLogIndex, len(args.Entries), rf.Log, args)
 
 				// update last new entry index
 				rf.lastNewEntryIndex = args.PrevLogIndex + len(args.Entries)
@@ -427,7 +441,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// append command to log if server believes it is the leader
 	if isLeader && !rf.killed() {
-		Debug(dLeader, "S%d receive command", rf.me)
+		// Debug(dLeader, "S%d receive command", rf.me)
 		rf.Log.AppendSingle(LogEntry{term, command})
 		rf.persist()
 	}
@@ -438,6 +452,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 }
 
 // RPC request or response contains term T > currentTerm
+// change state, and persist to stable storage
 // not lock here, check whether get lock before call this func
 func (rf *Raft) convertToFollower(term int) {
 	rf.serverState = Follower
@@ -485,7 +500,7 @@ func (rf *Raft) convertToCandidate() {
 				done <- struct{}{}
 			}
 		}
-		if voteCnt <= int32(len(rf.peers))/2 {
+		if atomic.LoadInt32(&voteCnt) <= int32(len(rf.peers))/2 {
 			done <- struct{}{}
 		}
 	}()
@@ -502,7 +517,7 @@ func (rf *Raft) convertToCandidate() {
 			// 这里的sendRequestVote跟它描述的不太一致，如果target server宕机了，会被阻塞住
 			// 而不是过一段时间会返回（也有可能是它设置的timeout太长了）
 			// 总之如果用waitGroup等等所有的routine结束就会出问题（明明收到半数以上的票却不能结束）
-			Debug(dInfo, "S%d -> S%d send request vote", rf.me, server)
+			// Debug(dInfo, "S%d -> S%d send request vote", rf.me, server)
 			if rf.sendRequestVote(server, &requestVoteArgs, &reply) {
 				//Debug(dVote, "S%d <- S%d, requestVote reply:%v", rf.me, server, reply)
 
@@ -528,7 +543,7 @@ func (rf *Raft) convertToCandidate() {
 	// 保证只有一个election goroutine能执行convertToLeader
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if voteCnt > int32(len(rf.peers))/2 && rf.serverState == Candidate {
+	if atomic.LoadInt32(&voteCnt) > int32(len(rf.peers))/2 && rf.serverState == Candidate {
 		// TODO 有没有可能当选leader的同时收到了一个更大的term，然后被改成了follower
 		rf.serverState = Leader
 		go rf.convertToLeader()
@@ -566,8 +581,12 @@ func (rf *Raft) convertToLeader() {
 			ch := make(chan struct{}, 40)
 			for {
 				// TODO 每隔一段时间发送心跳包，间隔设多少？
+				rf.mu.Lock()
 				if rf.serverState != Leader || rf.killed() {
+					rf.mu.Unlock()
 					break
+				} else {
+					rf.mu.Unlock()
 				}
 
 				// TODO 这个可能会出问题，比如一直阻塞但是一直在开goroutine，然后爆了
@@ -590,8 +609,12 @@ func (rf *Raft) convertToLeader() {
 			for {
 				// 每隔一段时间检查是否需要append entries
 				time.Sleep(20 * time.Millisecond)
+				rf.mu.Lock()
 				if rf.serverState != Leader || rf.killed() {
+					rf.mu.Unlock()
 					break
+				} else {
+					rf.mu.Unlock()
 				}
 
 				ch <- struct{}{}
@@ -607,8 +630,12 @@ func (rf *Raft) convertToLeader() {
 		// 每隔一段时间检查是否还担任leader
 		time.Sleep(10 * time.Millisecond)
 
+		rf.mu.Lock()
 		if rf.serverState != Leader || rf.killed() {
+			rf.mu.Unlock()
 			break
+		} else {
+			rf.mu.Unlock()
 		}
 
 		// 检查是否需要更新commitIndex
@@ -680,14 +707,42 @@ func (rf *Raft) checkAppendEntries(server int) {
 			break
 		}
 
+		/////////////////////////////////////////////////////////////////////////
+		//                     send InstallSnapshot RPC                       //
+		///////////////////////////////////////////////////////////////////////
+
 		if rf.nextIndex[server] <= rf.Log.LastIncludedIndex {
-			// TODO 这种情况下应该发送InstallSnapshot
-			Debug(dError, "S%d -> S%d, state:%v, nextIndex:%v, log:%v", rf.me, server, rf.serverState, rf.nextIndex, rf.Log)
+			// 需要发送的entry已经被discard掉了，这时候转变为给follower发送InstallSnapshot RPC
+			args := InstallSnapshotArgs{
+				Term:              rf.CurrentTerm,
+				LeaderId:          rf.me,
+				LastIncludedIndex: rf.Log.LastIncludedIndex,
+				LastIncludedTerm:  rf.Log.LastIncludedTerm,
+				Snapshot:          rf.snapshot,
+			}
+			rf.mu.Unlock()
+
+			reply := InstallSnapshotReply{}
+			// Debug(dWarn, "S%d -> S%d install snapshot, args:%v", rf.me, server, args)
+			if !rf.sendInstallSnapshop(server, &args, &reply) {
+				break
+			}
+
+			rf.mu.Lock()
+			if reply.Term > rf.CurrentTerm {
+				rf.convertToFollower(reply.Term)
+			}
+			// TODO install snapshot之后重设nextIndex和matchIndex
+			// 这个在多线程下会有点问题，刚重设完就被其他线程改了
+			rf.nextIndex[server] = rf.Log.LastIncludedIndex + 1
+			rf.matchIndex[server] = rf.Log.LastIncludedIndex
 			rf.mu.Unlock()
 			break
 		}
 
-		//Debug(dLeader, "S%d -> S%d, try to append entries", rf.me, server)
+		/////////////////////////////////////////////////////////////////////////
+		//                      send AppendEntries RPC                        //
+		///////////////////////////////////////////////////////////////////////
 
 		args := AppendEntriesArgs{
 			Term:         rf.CurrentTerm,
@@ -698,6 +753,7 @@ func (rf *Raft) checkAppendEntries(server int) {
 			LeaderCommit: rf.CommitIndex,
 		}
 
+		// TODO 目前暂时删除了accpetFlag，作用不是很大
 		// if accpetFlag {
 		// 上一个AppendEntreis成功，尝试将log中prevlogindex后面的所有entries都发送出去
 		args.Entries = make([]LogEntry, rf.Log.GetLastEntryIndex()-args.PrevLogIndex)
@@ -712,9 +768,9 @@ func (rf *Raft) checkAppendEntries(server int) {
 		rf.mu.Unlock()
 
 		reply := AppendEntriesReply{}
-		// TODO 有没有可能会阻塞在这的？
+		// 有没有可能会阻塞在这的？
 		//Debug(dLeader, "S%d <- S%d, send AppendEntries RPC: %v", server, rf.me, args)
-		Debug(dWarn, "S%d -> S%d append entries, args:%v", rf.me, server, args)
+		// Debug(dWarn, "S%d -> S%d append entries, args:%v", rf.me, server, args)
 		if !rf.sendAppendEntries(server, &args, &reply) {
 			// no response, break
 			break
@@ -733,7 +789,11 @@ func (rf *Raft) checkAppendEntries(server int) {
 				// accpetFlag = true
 			}
 		} else {
-			if args.PrevLogIndex+1 == rf.nextIndex[server] {
+			// TODO snapshot被接受之后，重新将nextIndex调成最大，这一句可能导致出问题
+			// if args.PrevLogIndex+1 == rf.nextIndex[server] {
+			// 改成下面这种写法，因为matchIndex必定是单调不下降的，所以不会出问题
+			// prevLogIndex <= matchIndex说明这个线程的进度肯定是落后最新的线程的
+			if args.PrevLogIndex > rf.matchIndex[server] {
 				// rf.nextIndex[server]--
 
 				// follower返回PossibleNextIndex告诉leader可能的nextIndex，加快收敛
@@ -741,17 +801,14 @@ func (rf *Raft) checkAppendEntries(server int) {
 					// follower没有这PrevLogTerm这个term的数据
 					// 找到第一个index对应的term不等于PrevLogTerm
 					prevTermIndex := rf.Log.GetPrevTermIndex(args.PrevLogIndex, args.PrevLogTerm)
-					if prevTermIndex < 0 {
-						// TODO 2D snapshot
-						panic("error")
-					}
+					// prevTermIndex返回结果<0，表示想要发送的已经被discard，这时候在for的下一轮发送InstallSnapshot RPC
 					rf.nextIndex[server] = prevTermIndex + 1
 				} else {
 					rf.nextIndex[server] = reply.PossibleNextIndex
 				}
 				// accpetFlag = false
 			} else {
-				// 别的routine已经成功返回，直接退出，unlock()释放
+				// 别的routine已经成功返回，直接退出，lock释放
 				rf.mu.Unlock()
 				break
 			}
@@ -769,7 +826,7 @@ type InstallSnapshotArgs struct {
 	LeaderId          int    // so follower can redirect clients
 	LastIncludedIndex int    // the snapshot replaces all entries up through and including this index
 	LastIncludedTerm  int    // term of LastIncludedIndex
-	Data              []byte // raw bytes of the snapshot chunk, starting at offset
+	Snapshot          []byte // raw bytes of the snapshot chunk, starting at offset
 	// Offset            int    // byte offset where chunk is positioned in the snapshot file
 	// Done              bool   // true is this is the last chunk
 }
@@ -779,8 +836,56 @@ type InstallSnapshotReply struct {
 }
 
 // install snapshot handler
-func (rf *Raft) InstallSnapshot() {
-	// TODO
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term > rf.CurrentTerm {
+		// change currentTerm and persist
+		rf.convertToFollower(args.Term)
+	}
+	reply.Term = rf.CurrentTerm
+	if args.Term < rf.CurrentTerm {
+		return
+	}
+
+	// Debug(dWarn, "S%d <- S%d receive install snapshot, args:%v, log:%v", rf.me, args.LeaderId, args, rf.Log)
+
+	if args.LastIncludedIndex <= rf.Log.LastIncludedIndex {
+		// args.snapshot比目前版本还旧，直接return
+		return
+	}
+	if args.LastIncludedIndex <= rf.Log.GetLastEntryIndex() &&
+		rf.Log.GetTerm(args.LastIncludedIndex) == args.LastIncludedTerm {
+		// Figure 13. 6.
+		// 此时follower缺的log entries肯定是leader有的，不需要install snapshot
+		return
+	}
+
+	// install snapshot
+	rf.snapshot = args.Snapshot
+	// 清空log
+	rf.Log.DiscardAll(args.LastIncludedIndex, args.LastIncludedTerm)
+	// commitIndex和appliedIndex都调整成lastIncludedIndex
+	rf.CommitIndex = args.LastIncludedIndex
+	rf.LastApplied = args.LastIncludedIndex
+	// lastNewEntryIndex清0
+	rf.lastNewEntryIndex = 0
+
+	// TODO snapshot发送给application
+	// 注意这时候锁还没有被释放，要是阻塞了会导致整个程序卡死在这了，要不要改成用goroutine？
+	applyMsg := ApplyMsg{
+		CommandValid:  false,
+		SnapshotValid: true,
+		Snapshot:      args.Snapshot,
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex,
+	}
+	go func() {
+		// Debug(dWarn, "S%d send snapshot to applyCh, args:%v", rf.me, applyMsg)
+		rf.applyCh <- applyMsg
+		// Debug(dWarn, "S%d finish send snapshot to applyCh, args:%v", rf.me, applyMsg)
+	}()
+	rf.saveStateAndSnapshot(args.Snapshot)
 }
 
 func (rf *Raft) sendInstallSnapshop(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
@@ -815,7 +920,7 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) ticker() {
 	rand.Seed(time.Now().Unix())
 
-	for rf.killed() == false {
+	for !rf.killed() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
@@ -827,16 +932,21 @@ func (rf *Raft) ticker() {
 
 		sleepTime := rand.Intn(200) + 200
 		time.Sleep(time.Duration(sleepTime) * time.Millisecond)
-		Debug(dInfo, "S%d ticker, ads:%v, killed:%v, state: %v, term: %v, logLength: %v, commitIndex:%v, lastApplied:%v, lastNewEntryIndex:%v",
-			rf.me, &rf, rf.killed(), rf.serverState, rf.CurrentTerm, rf.Log.GetLastEntryIndex(), rf.CommitIndex, rf.LastApplied, rf.lastNewEntryIndex)
-		if _, isLeader := rf.GetState(); !isLeader && rf.electionTimeout {
+		// Debug(dInfo, "S%d ticker, ads:%v, killed:%v, state: %v, term: %v, logLength: %v, commitIndex:%v, lastApplied:%v, lastNewEntryIndex:%v, nextIndex:%v",
+		// rf.me, &rf, rf.killed(), rf.serverState, rf.CurrentTerm, rf.Log.GetLastEntryIndex(), rf.CommitIndex, rf.LastApplied, rf.lastNewEntryIndex, rf.nextIndex)
+
+		_, isLeader := rf.GetState()
+		rf.mu.Lock()
+		isTimeout := rf.electionTimeout
+		rf.mu.Unlock()
+		if !isLeader && isTimeout {
 			go rf.convertToCandidate()
 		}
 	}
 }
 
-func (rf *Raft) updateLastApplied(applyCh chan ApplyMsg) {
-	for rf.killed() == false {
+func (rf *Raft) updateLastApplied() {
+	for !rf.killed() {
 		time.Sleep(20 * time.Millisecond)
 
 		for {
@@ -847,16 +957,17 @@ func (rf *Raft) updateLastApplied(applyCh chan ApplyMsg) {
 			}
 
 			rf.LastApplied++
-			Debug(dError, "S%d apply log[%d]:%v, lastNewEntryIndex:%v, commitIndex:%v, logLength:%v",
-				rf.me, rf.LastApplied, rf.Log.Get(rf.LastApplied), rf.lastNewEntryIndex, rf.CommitIndex, rf.Log.GetLastEntryIndex())
+			// Debug(dError, "S%d apply log[%d]:%v, lastNewEntryIndex:%v, commitIndex:%v, logLength:%v",
+			// rf.me, rf.LastApplied, rf.Log.Get(rf.LastApplied), rf.lastNewEntryIndex, rf.CommitIndex, rf.Log.GetLastEntryIndex())
 			applyMsg := ApplyMsg{
-				CommandValid: true,
-				Command:      rf.Log.Get(rf.LastApplied).Command,
-				CommandIndex: rf.LastApplied,
+				CommandValid:  true,
+				Command:       rf.Log.Get(rf.LastApplied).Command,
+				CommandIndex:  rf.LastApplied,
+				SnapshotValid: false,
 			}
 			rf.mu.Unlock()
 
-			applyCh <- applyMsg
+			rf.applyCh <- applyMsg
 			// //Debug(dError, "S%d apply log[%d]:%v Succeed.", rf.me, rf.LastApplied, rf.Log[rf.LastApplied])
 		}
 	}
@@ -879,6 +990,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
 	// check whether all variables are initialized
@@ -886,9 +998,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastNewEntryIndex = 0
 
 	// 开一个定时器检查是否有需要apply到service的log entry(lastApplied < commitIndex)
-	rf.CommitIndex = 0
-	rf.LastApplied = 0
-	go rf.updateLastApplied(applyCh)
+	// 在有了snapshot之后，commitIndex和lastApplied在重启时应该设成lastIncludedIndex
+	// rf.CommitIndex = 0
+	// rf.LastApplied = 0
+	go rf.updateLastApplied()
 
 	// TODO 如果server数目会改变，这样写就有问题了
 	rf.nextIndex = make([]int, len(peers))
