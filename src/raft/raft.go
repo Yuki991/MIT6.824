@@ -48,6 +48,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 
 	// For 2D:
 	SnapshotValid bool
@@ -83,13 +84,12 @@ type Raft struct {
 	nextIndex  []int // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
 	matchIndex []int // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
 
-	// auxiliary variables if needed
+	// auxiliary variables if desired
 	applyCh           chan ApplyMsg // channel which is used to send message to service
 	electionTimeout   bool          // true means If election timeout elapses without receiving AppendEntries RPC from current leader or granting vote to candidate
 	serverState       ServerState   // indicate the current state of server
 	lastNewEntryIndex int           // index of last received from the leader of currentTerm
 	snapshot          []byte        // 这个可以不存，如果installSnapshot需要，可以从stable storage里读取。先存着吧，方便
-	leaderId          int           // TODO 用于让follower可以转发clinet请求给leader
 }
 
 // return currentTerm and whether this server
@@ -428,8 +428,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	// Your code here (2B).
-
 	//Debug(dTerm, "S%d receive command, state:%v, term: %v, log length:%v, command:%v", rf.me, rf.serverState, rf.CurrentTerm, len(rf.Log), command)
 
 	// initialization
@@ -963,6 +961,7 @@ func (rf *Raft) updateLastApplied() {
 				CommandValid:  true,
 				Command:       rf.Log.Get(rf.LastApplied).Command,
 				CommandIndex:  rf.LastApplied,
+				CommandTerm:   rf.Log.GetTerm(rf.LastApplied),
 				SnapshotValid: false,
 			}
 			rf.mu.Unlock()
