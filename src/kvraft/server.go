@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -105,6 +106,7 @@ type KVServer struct {
 
 	// temporary variable //
 
+	// TODO 长时间运行之后这个map也会变得过大，需要一段时间后重置一下
 	// 用于执行完applied command后，通知对应的线程给client返回结果
 	// key: log index
 	// value: log term & result
@@ -131,6 +133,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			reply.Value = *opResult.Value
 		} else {
 			// 过时的请求，不处理应该也没问题
+			fmt.Printf("S%d, args:%v", kv.me, args)
 			reply.Err = ErrOutOfDate
 		}
 		return
@@ -138,7 +141,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	// 将command提交到raft中
 	index, term, isLeader := kv.rf.Start(op)
-	if !isLeader {
+	if !isLeader || kv.killed() {
 		// 该server不是leader，返回Err
 		reply.Err = ErrWrongLeader
 		reply.Value = ""
@@ -146,7 +149,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
-	Debug(dInfo, "S%d send Get to raft, args:%v", kv.me, args)
+	Debug(dInfo, "S%d send Get to raft, state:%v, args:%v, index:%v, term:%v", kv.me, kv.killed(), args, index, term)
 
 	// 提交command后新建一个chan放入appliedResultChMap中，然后等待raft apply command
 	// 如果map中已有别的chan，则放入msg告诉该chan的对应线程command执行失败
@@ -168,6 +171,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// 等待结果
 	appliedResultMsg := <-ch
 	if appliedResultMsg.Term == term {
+		if appliedResultMsg.Value == nil {
+			kv.mu.Lock()
+			fmt.Printf("S%v, index:%v, term:%v, msg:%v", kv.me, index, term, appliedResultMsg)
+			kv.mu.Unlock()
+		}
+
 		// command正确执行完毕
 		reply.Err = OK
 		reply.Value = *appliedResultMsg.Value
@@ -197,6 +206,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			reply.Err = OK
 		} else {
 			// 过时的请求，不处理应该也没问题
+			fmt.Printf("S%d, args:%v", kv.me, args)
 			reply.Err = ErrOutOfDate
 		}
 		return
@@ -204,14 +214,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	// 将command提交到raft中
 	index, term, isLeader := kv.rf.Start(op)
-	if !isLeader {
+	if !isLeader || kv.killed() {
 		// 该server不是leader，返回Err
 		reply.Err = ErrWrongLeader
 		defer kv.mu.Unlock()
 		return
 	}
 
-	Debug(dInfo, "S%d send PutAppend to raft, args:%v", kv.me, args)
+	Debug(dInfo, "S%d send PutAppend to raft, state:%v, args:%v, index:%v, term:%v", kv.me, kv.killed(), args, index, term)
 
 	// 提交command后新建一个chan放入appliedResultChMap中，然后等待raft apply command
 	// 如果map中已有别的chan，则放入msg告诉该chan的对应线程command执行失败
@@ -306,11 +316,12 @@ func (kv *KVServer) WaitForAppliedMsg() {
 				kv.execPutAppend(&op)
 			}
 
-			Debug(dCommit, "S%d apply a command:%v, current kv:%v", kv.me, op, kv.kvMap)
+			Debug(dCommit, "S%d apply a command:%v, index:%v, term:%v, value:%v", kv.me, op, applyMsg.CommandIndex, applyMsg.CommandTerm, value)
 
 			// 如果有index对应的channel在等待，就发送一条message过去
 			kv.mu.Lock()
 			if ch := kv.appliedResultChMap[applyMsg.CommandIndex]; ch != nil {
+				// delete(kv.appliedResultChMap, applyMsg.CommandIndex)
 				kv.appliedResultChMap[applyMsg.CommandIndex] = nil
 				appliedResultMsg := AppliedResultMsg{
 					Term:  applyMsg.CommandTerm,
