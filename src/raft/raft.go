@@ -945,7 +945,7 @@ func (rf *Raft) ticker() {
 
 func (rf *Raft) updateLastApplied() {
 	for !rf.killed() {
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(500 * time.Microsecond)
 
 		for {
 			rf.mu.Lock()
