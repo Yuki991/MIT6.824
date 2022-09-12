@@ -6,16 +6,25 @@ const (
 	ErrWrongLeader = "ErrWrongLeader"
 )
 
+const (
+	CountDivisor = 1000000007
+)
+
 type Err string
 
 // Put or Append
+// TODO 除了Op,Key,Value还需要什么？
+// 需要用于判断这个request是否已经“出现过”的额外信息
+// （因网络延迟/leader换人等原因导致的request超时而重发的requests）
+//
 type PutAppendArgs struct {
 	Key   string
 	Value string
 	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
+	// TODO You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Identity RPCIdentification // 用于识别rpc request
 }
 
 type PutAppendReply struct {
@@ -24,10 +33,11 @@ type PutAppendReply struct {
 
 type GetArgs struct {
 	Key string
-	// You'll have to add definitions here.
+	// TODO You'll have to add definitions here.
+	Identity RPCIdentification // 用于识别rpc request
 }
 
 type GetReply struct {
-	Err   Err
+	Err   Err // OK/ErrNoKey/ErrWrongLeader，只有当请求正确执行完毕才会返回OK
 	Value string
 }
