@@ -135,7 +135,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		}
 		return
 	}
-	kv.mu.Unlock()
 
 	// 将command提交到raft中
 	index, term, isLeader := kv.rf.Start(op)
@@ -143,6 +142,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		// 该server不是leader，返回Err
 		reply.Err = ErrWrongLeader
 		reply.Value = ""
+		defer kv.mu.Unlock()
 		return
 	}
 
@@ -150,7 +150,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	// 提交command后新建一个chan放入appliedResultChMap中，然后等待raft apply command
 	// 如果map中已有别的chan，则放入msg告诉该chan的对应线程command执行失败
-	kv.mu.Lock()
 	if ch := kv.appliedResultChMap[index]; ch != nil {
 		kv.appliedResultChMap[index] = nil
 		appliedResultMsg := AppliedResultMsg{
@@ -202,13 +201,13 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		}
 		return
 	}
-	kv.mu.Unlock()
 
 	// 将command提交到raft中
 	index, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		// 该server不是leader，返回Err
 		reply.Err = ErrWrongLeader
+		defer kv.mu.Unlock()
 		return
 	}
 
@@ -216,7 +215,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	// 提交command后新建一个chan放入appliedResultChMap中，然后等待raft apply command
 	// 如果map中已有别的chan，则放入msg告诉该chan的对应线程command执行失败
-	kv.mu.Lock()
 	if ch := kv.appliedResultChMap[index]; ch != nil {
 		kv.appliedResultChMap[index] = nil
 		appliedResultMsg := AppliedResultMsg{
@@ -262,7 +260,7 @@ func (kv *KVServer) execGet(op *Op) *string {
 	// 更新client最后处理的cmd的信息
 	kv.lastAppliedMap[op.Identity.ClerkID] = opResult
 	// return
-	return opResult.Value
+	return &value
 }
 
 func (kv *KVServer) execPutAppend(op *Op) {
