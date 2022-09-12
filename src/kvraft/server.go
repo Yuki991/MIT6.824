@@ -3,6 +3,7 @@ package kvraft
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"6.824/labgob"
 	"6.824/labrpc"
@@ -22,15 +23,16 @@ type Op struct {
 
 // 记录rpc的结果
 type OpResult struct {
-	Value    string            // value
+	Value    *string           // value，传指针
 	Identity RPCIdentification // 唯一标识
 }
 
 // 用于执行完applied command后，通知对应的线程给client返回结果
+// 注意这个string可能很大，记得传指针（这种中间状态全部应该传指针）
 type AppliedResultMsg struct {
 	// Index int // index
-	Term  int    // term
-	Value string // value
+	Term  int     // term
+	Value *string // value，传指针
 }
 
 //
@@ -110,6 +112,8 @@ type KVServer struct {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	Debug(dInfo, "S%d receive Get request, args:%v", kv.me, args)
+
 	op := Op{
 		Op:       OpGet,
 		Key:      args.Key,
@@ -124,7 +128,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		defer kv.mu.Unlock()
 		if opResult.Identity.RPCID == op.Identity.RPCID {
 			reply.Err = OK
-			reply.Value = opResult.Value
+			reply.Value = *opResult.Value
 		} else {
 			// 过时的请求，不处理应该也没问题
 			reply.Err = ErrOutOfDate
@@ -151,7 +155,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.appliedResultChMap[index] = nil
 		appliedResultMsg := AppliedResultMsg{
 			Term:  term,
-			Value: "",
+			Value: nil,
 		}
 		go func() {
 			ch <- appliedResultMsg
@@ -167,7 +171,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	if appliedResultMsg.Term == term {
 		// command正确执行完毕
 		reply.Err = OK
-		reply.Value = appliedResultMsg.Value
+		reply.Value = *appliedResultMsg.Value
 	} else {
 		// 该index下的log entry对应的command不是提交的command
 		reply.Err = ErrWrongLeader
@@ -176,6 +180,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	Debug(dInfo, "S%d receive PutAppend request, args:%v", kv.me, args)
+
 	op := Op{
 		Op:       args.Op,
 		Key:      args.Key,
@@ -215,7 +221,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.appliedResultChMap[index] = nil
 		appliedResultMsg := AppliedResultMsg{
 			Term:  term,
-			Value: "",
+			Value: nil,
 		}
 		go func() {
 			ch <- appliedResultMsg
@@ -237,23 +243,20 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 }
 
-func (kv *KVServer) execGet(op *Op) string {
+func (kv *KVServer) execGet(op *Op) *string {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
 	// 判断这个cmd是否已经执行过（需要这个判断是因为可能有相同的command写入到log中）
 	if opResult := kv.lastAppliedMap[op.Identity.ClerkID]; opResult.Identity.RPCID >= op.Identity.RPCID {
 		// 已经执行过
-		if opResult.Identity.RPCID == op.Identity.RPCID {
-			return opResult.Value
-		}
-		// 一个旧的request，直接返回空串
-		return ""
+		return opResult.Value
 	}
 
 	// 执行Get
+	value := kv.kvMap[op.Key]
 	opResult := OpResult{
-		Value:    kv.kvMap[op.Key],
+		Value:    &value,
 		Identity: op.Identity,
 	}
 	// 更新client最后处理的cmd的信息
@@ -280,7 +283,7 @@ func (kv *KVServer) execPutAppend(op *Op) {
 		kv.kvMap[op.Key] = kv.kvMap[op.Key] + op.Value
 	}
 	opResult := OpResult{
-		Value:    "", // putappend没有返回值
+		Value:    nil, // putappend没有返回值
 		Identity: op.Identity,
 	}
 	// 更新client最后处理的cmd的信息
@@ -294,7 +297,7 @@ func (kv *KVServer) WaitForAppliedMsg() {
 
 		// raft apply a command
 		if applyMsg.CommandValid {
-			value := ""
+			var value *string
 			op := applyMsg.Command.(Op)
 
 			// 执行applied cmd
@@ -328,6 +331,17 @@ func (kv *KVServer) WaitForAppliedMsg() {
 			// TODO
 			continue
 		}
+	}
+}
+
+func (kv *KVServer) DebugTicker() {
+	start := time.Now()
+	for time.Since(start).Seconds() < 30 {
+		time.Sleep(100 * time.Millisecond)
+
+		kv.mu.Lock()
+		// Debug(dTimer, "S%d killed:%v", kv.me, kv.killed())
+		kv.mu.Unlock()
 	}
 }
 
@@ -385,6 +399,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	go kv.WaitForAppliedMsg()
+	// go kv.DebugTicker()
 
 	return kv
 }
