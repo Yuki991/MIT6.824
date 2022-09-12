@@ -102,7 +102,7 @@ type KVServer struct {
 	// 保证幂等性，注意如果client过多会出（内存）问题
 	// key: client_id
 	// value: op result
-	lastAppliedMap map[int]OpResult
+	lastAppliedMap map[int64]OpResult
 
 	// temporary variable //
 
@@ -400,7 +400,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.kvMap = make(map[string]string)
-	kv.lastAppliedMap = make(map[int]OpResult)
+	kv.lastAppliedMap = make(map[int64]OpResult)
 	kv.appliedResultChMap = make(map[int]chan AppliedResultMsg)
 
 	kv.applyCh = make(chan raft.ApplyMsg)

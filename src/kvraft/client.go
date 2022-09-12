@@ -15,15 +15,16 @@ type Clerk struct {
 	// You will have to modify this struct.
 
 	// mu         sync.Mutex // lock
-	rpcCount   int // 用于给rpc编号，从1开始，太大了会溢出，取个余
-	lastLeader int // 记录上一次成功发送请求时的leader
+	clerkID    int64 // 赋一个极大的随机数，只有极小概率冲突
+	rpcCount   int   // 用于给rpc编号，从1开始，太大了会溢出，取个余
+	lastLeader int   // 记录上一次成功发送请求时的leader
 }
 
 // 用于Server判别是否是同一个RPC request
 //
 type RPCIdentification struct {
-	ClerkID int // clerk id，比如ip + port，考虑到这里是单机所以直接用clerk实例的地址了
-	RPCID   int // rpc编号，合法编号从1开始
+	ClerkID int64 // clerk id，比如ip + port
+	RPCID   int   // rpc编号，合法编号从1开始
 }
 
 func nrand() int64 {
@@ -68,7 +69,7 @@ func (ck *Clerk) GetNewRPCIdentification() RPCIdentification {
 	// 取余防止过大，先取余后加1保证编号从1开始
 	ck.rpcCount = ck.rpcCount%CountDivisor + 1
 	return RPCIdentification{
-		ClerkID: int(reflect.ValueOf(ck).Pointer()), // 返回Clerk实例地址作为ClerkID
+		ClerkID: ck.clerkID, // 返回Clerk实例地址作为ClerkID
 		RPCID:   ck.rpcCount,
 	}
 }
@@ -77,6 +78,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.clerkID = nrand()
 	ck.rpcCount = 0
 	ck.lastLeader = 0
 	return ck
