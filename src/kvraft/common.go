@@ -4,10 +4,18 @@ const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrOutOfDate   = "ErrOutOfDate"
 )
 
 const (
 	CountDivisor = 1000000007
+)
+
+const (
+	OpGet       = "Get"
+	OpPut       = "Put"
+	OpAppend    = "Append"
+	OpPutAppend = "PutAppend"
 )
 
 type Err string
@@ -21,9 +29,9 @@ type PutAppendArgs struct {
 	Key   string
 	Value string
 	Op    string // "Put" or "Append"
-	// TODO You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+
 	Identity RPCIdentification // 用于识别rpc request
 }
 
@@ -32,8 +40,7 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key string
-	// TODO You'll have to add definitions here.
+	Key      string
 	Identity RPCIdentification // 用于识别rpc request
 }
 

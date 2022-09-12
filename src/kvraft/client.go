@@ -68,7 +68,6 @@ func (ck *Clerk) Get(key string) string {
 		Key:      key,
 		Identity: ck.GetNewRPCIdentification(),
 	}
-	reply := GetReply{}
 
 	// TODO 发送给server的指令只有当正确执行时才会返回OK
 	// 返回Err说明：
@@ -78,6 +77,7 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		// leader过时了可能导致leader id在当前循环变量之前，所以需要一个外层循环
 		for i := range ck.servers {
+			reply := GetReply{}
 			if !ck.sendGetRPC(i, &args, &reply) {
 				// rpc没有收到回复，尝试下一个server
 				continue
@@ -93,6 +93,8 @@ func (ck *Clerk) Get(key string) string {
 			case ErrWrongLeader:
 				// 发送对象不是leader，尝试下一个server
 				continue
+			default:
+				panic("Something wrong.")
 			}
 		}
 	}
@@ -124,7 +126,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		Op:       op,
 		Identity: ck.GetNewRPCIdentification(),
 	}
-	reply := PutAppendReply{}
 
 	// TODO 发送给server的指令只有当正确执行时才会返回OK
 	// 返回Err说明：
@@ -134,11 +135,15 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		// leader过时了可能导致leader id在当前循环变量之前，所以需要一个外层循环
 		// TODO 每次都重新去试哪个是leader有点蠢的，可以记录上次成功时的leader是谁
+		// 这个写法还有个问题就是如果当前没有leader，它会发送大量无用的请求
 		for i := range ck.servers {
+			reply := PutAppendReply{}
 			if !ck.sendPutAppendRPC(i, &args, &reply) {
 				// rpc没有收到回复，尝试下一个server
 				continue
 			}
+
+			// Debug(dWarn, "client receive PutAppend reply:%v, args:%v", reply, args)
 
 			switch reply.Err {
 			case OK:
@@ -147,6 +152,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			case ErrWrongLeader:
 				// 发送对象不是leader，尝试下一个server
 				continue
+			default:
+				panic("Something wrong.")
 			}
 		}
 	}
@@ -159,8 +166,8 @@ func (ck *Clerk) sendPutAppendRPC(server int, args *PutAppendArgs, reply *PutApp
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	ck.PutAppend(key, value, OpPut)
 }
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	ck.PutAppend(key, value, OpAppend)
 }
