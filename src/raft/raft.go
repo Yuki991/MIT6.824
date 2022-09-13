@@ -585,9 +585,8 @@ func (rf *Raft) convertToLeader() {
 				if rf.serverState != Leader || rf.killed() {
 					rf.mu.Unlock()
 					break
-				} else {
-					rf.mu.Unlock()
 				}
+				rf.mu.Unlock()
 
 				// TODO 这个可能会出问题，比如一直阻塞但是一直在开goroutine，然后爆了
 				// 不开goroutine就可能会导致之前的一直阻塞，发不了新的
@@ -605,38 +604,34 @@ func (rf *Raft) convertToLeader() {
 		// 定时检查是否需要发送AppendEntriesRPC给followers
 		go func(server int) {
 			// 限制goroutine个数
-			ch := make(chan struct{}, 10)
+			ch := make(chan struct{}, 40)
 			for {
 				// 每隔一段时间检查是否需要append entries
-				time.Sleep(20 * time.Millisecond)
 				rf.mu.Lock()
 				if rf.serverState != Leader || rf.killed() {
 					rf.mu.Unlock()
 					break
-				} else {
-					rf.mu.Unlock()
 				}
+				rf.mu.Unlock()
 
 				ch <- struct{}{}
 				go func() {
 					rf.checkAppendEntries(server)
 					<-ch
 				}()
+
+				time.Sleep(2 * time.Millisecond)
 			}
 		}(i)
 	}
 
 	for {
-		// 每隔一段时间检查是否还担任leader
-		time.Sleep(10 * time.Millisecond)
-
 		rf.mu.Lock()
 		if rf.serverState != Leader || rf.killed() {
 			rf.mu.Unlock()
 			break
-		} else {
-			rf.mu.Unlock()
 		}
+		rf.mu.Unlock()
 
 		// 检查是否需要更新commitIndex
 		rf.mu.Lock()
@@ -658,6 +653,9 @@ func (rf *Raft) convertToLeader() {
 			rf.CommitIndex = newCommitIndex
 		}
 		rf.mu.Unlock()
+
+		// 每隔一段时间检查是否还担任leader
+		time.Sleep(1 * time.Millisecond)
 	}
 }
 
