@@ -46,6 +46,10 @@ func CallFunc(timeout time.Duration, f interface{}, args ...interface{}) bool {
 		_args[i] = reflect.ValueOf(args[i])
 	}
 
+	// if _f.Kind() != reflect.Func {
+	// 	panic(fmt.Sprintf("CallFunc: second parameter must be a function"))
+	// }
+
 	go func() {
 		_f.Call(_args)
 		ch <- true

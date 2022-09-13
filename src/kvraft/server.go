@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -313,8 +314,8 @@ func (kv *KVServer) WaitForAppliedMsg() {
 
 			Debug(dCommit, "S%d apply a command:%v, index:%v, term:%v, value:%v", kv.me, op, applyMsg.CommandIndex, applyMsg.CommandTerm, value)
 
-			// 如果有index对应的channel在等待，就发送一条message过去
 			kv.mu.Lock()
+			// 如果有index对应的channel在等待，就发送一条message过去
 			if ch := kv.appliedResultChMap[applyMsg.CommandIndex]; ch != nil {
 				// delete(kv.appliedResultChMap, applyMsg.CommandIndex)
 				kv.appliedResultChMap[applyMsg.CommandIndex] = nil
@@ -326,15 +327,90 @@ func (kv *KVServer) WaitForAppliedMsg() {
 					ch <- appliedResultMsg
 				}()
 			}
+
+			// TODO applied cmd处理完成之后，检查是否需要snapshot，判断的threshold看着调吧
+			if kv.maxraftstate != -1 &&
+				float64(kv.persister.RaftStateSize()) >= 0.95*float64(kv.maxraftstate) {
+				// encode state machine
+				snapshot := kv.snapshot()
+				// 让raft去discard前面已经不需要的log entries
+				kv.rf.Snapshot(applyMsg.CommandIndex, snapshot)
+				// TODO 顺便裁一下appliedResultChMap？
+			}
 			kv.mu.Unlock()
 			continue
 		}
 
 		// raft install snapshot
 		if applyMsg.SnapshotValid {
-			// TODO
+			// 该server的数据大幅落后，需要重置
+			// 清空appliedResultChMap，并将终止相应的线程（该server现在肯定不是leader）
+			// kvMap和lastAppliedMap从snapshot里读取
+
+			kv.mu.Lock()
+
+			// decode snapshot
+			r := bytes.NewBuffer(applyMsg.Snapshot)
+			d := labgob.NewDecoder(r)
+			var kvMap map[string]string
+			var lastAppliedMap map[int64]OpResult
+			if d.Decode(&kvMap) != nil || d.Decode(&lastAppliedMap) != nil {
+				// decode error，忽视这一条appliedMsg
+				fmt.Printf("S%v Applied InstallSnapshot Error.", kv.me)
+				kv.mu.Unlock()
+				continue
+			} else {
+				kv.kvMap = kvMap
+				kv.lastAppliedMap = lastAppliedMap
+			}
+
+			// 清空appliedResultChMap
+			for _, ch := range kv.appliedResultChMap {
+				appliedResultMsg := AppliedResultMsg{
+					Term:  -1,
+					Value: "",
+				}
+				go func(ch chan AppliedResultMsg) {
+					ch <- appliedResultMsg
+				}(ch)
+			}
+			kv.appliedResultChMap = make(map[int]chan AppliedResultMsg)
+
+			kv.mu.Unlock()
 			continue
 		}
+	}
+}
+
+// encode state machine
+func (kv *KVServer) snapshot() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.kvMap)
+	e.Encode(kv.lastAppliedMap)
+	return w.Bytes()
+}
+
+// 启动服务器时尝试从stable storage里读取snapshot
+func (kv *KVServer) readSnapshot() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	data := kv.persister.ReadSnapshot()
+	if data == nil || len(data) < 1 {
+		// stable storage里没有snapshot
+		kv.kvMap = make(map[string]string)
+		kv.lastAppliedMap = make(map[int64]OpResult)
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if d.Decode(&kv.kvMap) != nil || d.Decode(&kv.lastAppliedMap) != nil {
+		// decode error
+		kv.kvMap = make(map[string]string)
+		kv.lastAppliedMap = make(map[int64]OpResult)
+		panic("snapshot decode error")
 	}
 }
 
@@ -394,15 +470,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.persister = persister
 	kv.maxraftstate = maxraftstate
 
-	// You may need initialization code here.
-	kv.kvMap = make(map[string]string)
-	kv.lastAppliedMap = make(map[int64]OpResult)
+	// recover state mahchine from snapshot
+	kv.readSnapshot()
 	kv.appliedResultChMap = make(map[int]chan AppliedResultMsg)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	// You may need initialization code here.
 	go kv.WaitForAppliedMsg()
 	// go kv.DebugTicker()
 
