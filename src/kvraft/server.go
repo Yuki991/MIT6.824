@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"6.824/labgob"
 	"6.824/labrpc"
@@ -96,7 +95,9 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 
+	////////////////////
 	// state machine //
+	//////////////////
 
 	// key value map，实际存储key和value的map
 	kvMap map[string]string
@@ -106,7 +107,9 @@ type KVServer struct {
 	// value: op result
 	lastAppliedMap map[int64]OpResult
 
+	/////////////////////////
 	// temporary variable //
+	///////////////////////
 
 	// TODO 长时间运行之后这个map也会变得过大，需要一段时间后重置一下
 	// 用于执行完applied command后，通知对应的线程给client返回结果
@@ -328,14 +331,14 @@ func (kv *KVServer) WaitForAppliedMsg() {
 				}()
 			}
 
-			// TODO applied cmd处理完成之后，检查是否需要snapshot，判断的threshold看着调吧
+			// applied cmd处理完成之后，检查是否需要snapshot
 			if kv.maxraftstate != -1 &&
-				float64(kv.persister.RaftStateSize()) >= 0.95*float64(kv.maxraftstate) {
+				kv.persister.RaftStateSize() >= kv.maxraftstate {
 				// encode state machine
 				snapshot := kv.snapshot()
 				// 让raft去discard前面已经不需要的log entries
 				kv.rf.Snapshot(applyMsg.CommandIndex, snapshot)
-				// TODO 顺便裁一下appliedResultChMap？
+				// 顺便裁一下appliedResultChMap？
 			}
 			kv.mu.Unlock()
 			continue
@@ -414,16 +417,16 @@ func (kv *KVServer) readSnapshot() {
 	}
 }
 
-func (kv *KVServer) DebugTicker() {
-	start := time.Now()
-	for time.Since(start).Seconds() < 30 {
-		time.Sleep(100 * time.Millisecond)
+// func (kv *KVServer) DebugTicker() {
+// 	start := time.Now()
+// 	for time.Since(start).Seconds() < 30 {
+// 		time.Sleep(100 * time.Millisecond)
 
-		kv.mu.Lock()
-		// Debug(dTimer, "S%d killed:%v", kv.me, kv.killed())
-		kv.mu.Unlock()
-	}
-}
+// 		kv.mu.Lock()
+// 		Debug(dTimer, "S%d killed:%v", kv.me, kv.killed())
+// 		kv.mu.Unlock()
+// 	}
+// }
 
 //
 // the tester calls Kill() when a KVServer instance won't
