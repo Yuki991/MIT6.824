@@ -29,13 +29,32 @@ type Config struct {
 }
 
 const (
-	OK = "OK"
+	OK             = "OK"
+	ErrWrongLeader = "ErrWrongLeader"
+	ErrOutOfDate   = "ErrOutOfDate"
 )
+
+const (
+	OpJoin  = 0
+	OpLeave = 1
+	OpMove  = 2
+	OpQuery = 3
+)
+
+const (
+	CountDivisor = 1000000007
+)
+
+type RPCIdentification struct {
+	ClerkID int64 // clerk id，比如ip + port
+	RPCID   int   // rpc编号，合法编号从1开始
+}
 
 type Err string
 
 type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+	Servers  map[int][]string // new GID -> servers mappings
+	Identity RPCIdentification
 }
 
 type JoinReply struct {
@@ -44,7 +63,8 @@ type JoinReply struct {
 }
 
 type LeaveArgs struct {
-	GIDs []int
+	GIDs     []int
+	Identity RPCIdentification
 }
 
 type LeaveReply struct {
@@ -53,8 +73,9 @@ type LeaveReply struct {
 }
 
 type MoveArgs struct {
-	Shard int
-	GID   int
+	Shard    int
+	GID      int
+	Identity RPCIdentification
 }
 
 type MoveReply struct {
@@ -63,11 +84,26 @@ type MoveReply struct {
 }
 
 type QueryArgs struct {
-	Num int // desired config number
+	Num      int // desired config number
+	Identity RPCIdentification
 }
 
 type QueryReply struct {
 	WrongLeader bool
 	Err         Err
 	Config      Config
+}
+
+func (c *Config) copy() Config {
+	r := Config{
+		Num:    c.Num,
+		Groups: make(map[int][]string),
+	}
+	for i := range c.Shards {
+		r.Shards[i] = c.Shards[i]
+	}
+	for k, v := range c.Groups {
+		r.Groups[k] = v
+	}
+	return r
 }
