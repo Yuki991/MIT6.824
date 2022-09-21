@@ -94,7 +94,7 @@ type QueryReply struct {
 	Config      Config
 }
 
-func (c *Config) copy() Config {
+func (c *Config) Copy() Config {
 	r := Config{
 		Num:    c.Num,
 		Groups: make(map[int][]string),

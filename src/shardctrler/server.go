@@ -183,11 +183,11 @@ func (sc *ShardCtrler) rebalance(c *Config) {
 	arr := make([]int, 0)
 	cntMap := make(map[int]int)
 	for k := range c.Groups {
-		cntMap[k] = 1
+		cntMap[k] = 0
 		arr = append(arr, k)
 	}
 	for i := range c.Shards {
-		if cntMap[c.Shards[i]] == 0 {
+		if _, ok := cntMap[c.Shards[i]]; !ok {
 			c.Shards[i] = 0
 		} else {
 			cntMap[c.Shards[i]]++
@@ -248,7 +248,7 @@ func (sc *ShardCtrler) execJoin(args *JoinArgs) interface{} {
 	}
 
 	// 执行join
-	config := sc.configs[len(sc.configs)-1].copy()
+	config := sc.configs[len(sc.configs)-1].Copy()
 	config.Num++
 	for k, v := range args.Servers {
 		config.Groups[k] = v
@@ -277,7 +277,7 @@ func (sc *ShardCtrler) execLeave(args *LeaveArgs) interface{} {
 	}
 
 	// 执行leave
-	config := sc.configs[len(sc.configs)-1].copy()
+	config := sc.configs[len(sc.configs)-1].Copy()
 	config.Num++
 	for _, v := range args.GIDs {
 		delete(config.Groups, v)
@@ -306,7 +306,7 @@ func (sc *ShardCtrler) execMove(args *MoveArgs) interface{} {
 	}
 
 	// 执行move
-	config := sc.configs[len(sc.configs)-1].copy()
+	config := sc.configs[len(sc.configs)-1].Copy()
 	config.Num++
 	config.Shards[args.Shard] = args.GID
 	sc.configs = append(sc.configs, config)
