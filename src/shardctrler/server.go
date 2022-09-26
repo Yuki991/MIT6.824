@@ -161,6 +161,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	}
 
 	result, err := sc.submitCmdToRaft(&op, args.Identity)
+	sc.mu.Lock()
 	switch err {
 	case OK:
 		reply.Config = sc.configs[result.(int)]
@@ -175,6 +176,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 		reply.WrongLeader = false
 		reply.Err = err
 	}
+	sc.mu.Unlock()
 }
 
 // re-balance，需要是“确定的”算法
