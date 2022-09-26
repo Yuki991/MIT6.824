@@ -62,7 +62,7 @@ func (l *Log) Discard(index int) bool {
 
 	i := index - l.LastIncludedIndex - 1
 	lastIncludedIndex := index
-	lastIncludedTerm := l.Log[i].Term
+	lastIncludedTerm := l.GetTerm(index)
 	l.Log = l.Log[i+1:]
 	l.LastIncludedIndex = lastIncludedIndex
 	l.LastIncludedTerm = lastIncludedTerm
