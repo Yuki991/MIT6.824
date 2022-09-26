@@ -55,7 +55,7 @@ func Debug(topic logTopic, format string, a ...interface{}) {
 }
 
 func getDebug() bool {
-	v := os.Getenv("DEBUG")
+	v := os.Getenv("SKVDEBUG")
 	if v == "1" || strings.ToLower(v) == "true" {
 		return true
 	}

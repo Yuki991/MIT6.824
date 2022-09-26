@@ -1,6 +1,7 @@
 package shardkv
 
 import (
+	"fmt"
 	"reflect"
 	"time"
 
@@ -81,9 +82,9 @@ type ReconfigDoneArgs struct {
 type ShardInputArgs struct {
 	ConfigNum int   // 当前config num
 	Shard     Shard // data
-	// 不需要正确性验证
-	// Gid        int    // 发送方的gid
-	// ServerName string // 发送方的server name
+	// 不需要正确性验证，下面两个可以优化掉
+	Gid    int // 发送方的gid
+	Server int // 发送方的server name
 }
 
 type ShardInputReply struct {
@@ -91,13 +92,14 @@ type ShardInputReply struct {
 }
 
 type ShardOutputArgs struct {
-	ShardID int
+	ConfigNum int
+	ShardID   int
 }
 
 func (s *Shard) Copy() *Shard {
 	r := Shard{
 		ShardID:        s.ShardID,
-		Preparing:      s.Preparing,
+		OK:             s.OK,
 		KVMap:          make(map[string]string),
 		LastAppliedMap: make(map[int64]OpResult),
 	}
@@ -117,6 +119,7 @@ func If(condition bool, trueVal interface{}, falseVal interface{}) interface{} {
 	return falseVal
 }
 
+// TODO 这个处理得不好，没有处理f的返回值
 func CallFunc(timeout time.Duration, f interface{}, args ...interface{}) bool {
 	ch := make(chan bool)
 	_f := reflect.ValueOf(f)
@@ -139,4 +142,48 @@ func CallFunc(timeout time.Duration, f interface{}, args ...interface{}) bool {
 		<-ch
 	}()
 	return ok
+}
+
+func (s *Shard) String() string {
+	var str string
+	// str += fmt.Sprintf("%v", s.OK)
+	str += "["
+	for k := range s.KVMap {
+		str += k + ", "
+	}
+	str += "]"
+	return str
+}
+
+func (c Config) String() string {
+	var str string
+	str = "{"
+	str += fmt.Sprintf("Trans:%v, ", c.Transition)
+	str += fmt.Sprintf("Num:%v, ", c.Config.Num)
+	str += fmt.Sprintf("ConfigShard:%v, ", c.Config.Shards)
+	str += fmt.Sprintf("Inshard:%v, OutShard:%v, ", c.InShard, c.OutShard)
+	str += "}"
+	return str
+}
+
+func (op Op) String() string {
+	var str string
+	str = "{"
+	switch op.Type {
+	case OpPut:
+		str += "Put, "
+	case OpAppend:
+		str += "Append, "
+	case OpGet:
+		str += "Get, "
+	case OpReconfig:
+		str += "Reconfig, "
+	case OpShardInput:
+		str += "ShardInput, "
+	case OpShardOutput:
+		str += "ShardOutput, "
+	}
+	// str += fmt.Sprintf("%v", op.Args)
+	str += " }"
+	return str
 }

@@ -45,9 +45,9 @@ type Config struct {
 }
 
 type Shard struct {
-	ShardID   int               // id
-	Preparing bool              // true: 能提供服务；false: 需要从别的servers传输数据
-	KVMap     map[string]string // key value map
+	ShardID int               // id
+	OK      bool              // true: 能提供服务；false: 需要从别的servers传输数据
+	KVMap   map[string]string // key value map
 
 	// TODO 每个shard单独维护一个map，记录client在这个shard上一个request的结果，
 	// 这样做不是不行，就是空间开销大了点
@@ -126,6 +126,8 @@ type ShardKV struct {
 	// 用于执行完applied command后，通知对应的线程给client返回结果
 	// key: log index, value: log term & result & err
 	appliedResultChMap map[int]chan AppliedResultMsg
+
+	appliedIndex int // 用于snapshot
 }
 
 // false: 服务器不负责该shard
@@ -142,12 +144,15 @@ func (kv *ShardKV) serveFor(shardID int) bool {
 func (kv *ShardKV) submitClientReqToRaft(op *Op, id RPCIdentification, key string) (interface{}, Err) {
 	kv.mu.Lock()
 	shardID := key2shard(key)
+
+	// Debug(dInfo, "G%v-S%v receive cmd: %v, shardID:%v, config:%v, shardMap:%v", kv.gid, kv.me, *op, shardID, kv.config, kv.shardMap)
+
 	if !kv.serveFor(shardID) {
 		// server不负责这个shard
 		defer kv.mu.Unlock()
 		return nil, ErrWrongGroup
 	}
-	if !kv.shardMap[shardID].Preparing {
+	if shard, ok := kv.shardMap[shardID]; !ok || !shard.OK {
 		// server负责这个shard，但是数据还没有从其他server转移过来
 		defer kv.mu.Unlock()
 		return nil, ErrDataUpdating
@@ -169,6 +174,8 @@ func (kv *ShardKV) submitClientReqToRaft(op *Op, id RPCIdentification, key strin
 		defer kv.mu.Unlock()
 		return nil, ErrWrongLeader
 	}
+
+	// Debug(dInfo, "G%v-S%v submit cmd to raft, cmd:%v", kv.gid, kv.me, *op)
 
 	// index对应的旧req执行失败
 	if ch := kv.appliedResultChMap[index]; ch != nil {
@@ -227,10 +234,13 @@ func (kv *ShardKV) PutAppendHandler(args *PutAppendArgs, reply *PutAppendReply) 
 // DataTransmit handler
 // 其他group向该group传输一个shard
 func (kv *ShardKV) DataTransmitHandler(args *ShardInputArgs, reply *ShardInputReply) {
-	// 幂等性很容易保证, 只有第一次会accept，看一看preparing的状态就知道了，所以直接丢进raft里
+	// 幂等性很容易保证, 只有第一次会accept，看一看shard的状态（是否OK）就知道了，所以直接丢进raft里
 	// 有没有可能有两个groups给一个group发同一个shard的数据？
 
 	kv.mu.Lock()
+
+	// Debug(dInfo, "G%v-S%v receive data from G%v-S%v, args:%v", kv.gid, kv.me, args.Gid, args.Server, *args)
+
 	if args.ConfigNum < kv.config.Config.Num {
 		// wrong config number，也返回OK，表示我接收到你传输的shard了，虽然已经过时了
 		kv.mu.Unlock()
@@ -243,7 +253,7 @@ func (kv *ShardKV) DataTransmitHandler(args *ShardInputArgs, reply *ShardInputRe
 		reply.Err = ErrWrong
 		return
 	}
-	if !kv.shardMap[args.Shard.ShardID].Preparing {
+	if shard, ok := kv.shardMap[args.Shard.ShardID]; ok && shard.OK {
 		// 这个shard已经传输过了
 		kv.mu.Unlock()
 		reply.Err = OK
@@ -251,18 +261,24 @@ func (kv *ShardKV) DataTransmitHandler(args *ShardInputArgs, reply *ShardInputRe
 	}
 	kv.mu.Unlock()
 
-	var argsCopy ShardInputArgs
-	argsCopy.ConfigNum = args.ConfigNum
-	argsCopy.Shard = *args.Shard.Copy()
+	argsCopy := ShardInputArgs{
+		ConfigNum: args.ConfigNum,
+		Shard:     *args.Shard.Copy(),
+		Gid:       args.Gid,
+		Server:    args.Server,
+	}
 	var op Op
 	op.Type = OpShardInput
 	op.Args = argsCopy
 
 	kv.mu.Lock()
+
+	// Debug(dInfo, "G%v-S%v receive data from G%v-S%v, submit to raft", kv.gid, kv.me, args.Gid, args.Server)
+
 	// submit to raft
 	index, term, isLeader := kv.rf.Start(op)
 	if !isLeader || kv.killed() {
-		defer kv.mu.Unlock()
+		kv.mu.Unlock()
 		reply.Err = ErrWrongLeader
 		return
 	}
@@ -285,6 +301,11 @@ func (kv *ShardKV) DataTransmitHandler(args *ShardInputArgs, reply *ShardInputRe
 
 	// wait
 	appliedResultMsg := <-ch
+
+	// defer func() {
+	// 	Debug(dInfo, "G%v-S%v receive data from G%v-S%v, reply:%v", kv.gid, kv.me, args.Gid, args.Server, reply)
+	// }()
+
 	if appliedResultMsg.Term == term {
 		// applied的就是提交的cmd
 		reply.Err = appliedResultMsg.Err
@@ -355,7 +376,7 @@ func (kv *ShardKV) execGet(args *GetArgs) (interface{}, Err) {
 
 	// 执行get
 	result, ok := kv.shardMap[shardID].KVMap[args.Key]
-	err := If(ok, OK, ErrNoKey).(Err)
+	err := Err(If(ok, OK, ErrNoKey).(string))
 	opResult := OpResult{
 		Result:   result,
 		Err:      err,
@@ -396,20 +417,40 @@ func (kv *ShardKV) execReconfig(args *ReconfigArgs) (interface{}, Err) {
 	for i := 0; i < shardctrler.NShards; i++ {
 		if kv.config.Config.Shards[i] == kv.gid && kv.config.OldConfig.Shards[i] != kv.gid {
 			// 需要传入该shard
-			kv.config.InShard[i] = kv.config.OldConfig.Shards[i]
+
 			// 初始化对应的Shard
 			kv.shardMap[i] = &Shard{
 				ShardID:        i,
-				Preparing:      true,
+				OK:             false,
 				KVMap:          make(map[string]string),
 				LastAppliedMap: make(map[int64]OpResult),
+			}
+
+			// TODO 如果该shard之前没有groups负责，不需要等待数据传入
+			if kv.config.OldConfig.Shards[i] != 0 {
+				kv.config.InShard[i] = kv.config.OldConfig.Shards[i]
+			} else {
+				// 不需要等待数据传入，ok = true
+				kv.shardMap[i].OK = true
 			}
 		}
 		if kv.config.Config.Shards[i] != kv.gid && kv.config.OldConfig.Shards[i] == kv.gid {
 			// 需要传出该shard
-			kv.config.OutShard[i] = kv.config.Config.Shards[i]
+
+			// 如果该shard之后没有groups负责，不需要传出（不存在这种情况吧）
+			if kv.config.Config.Shards[i] != 0 {
+				kv.config.OutShard[i] = kv.config.Config.Shards[i]
+			}
 		}
 	}
+
+	// 存在不需要数据传输就能完成re-config的情况
+	go func() {
+		kv.checkReconfigDone()
+	}()
+
+	// Debug(dInfo, "G%v-S%v start reconfig: %v", kv.gid, kv.me, kv.config)
+
 	return nil, OK
 }
 
@@ -423,13 +464,18 @@ func (kv *ShardKV) execShardInput(args *ShardInputArgs) (interface{}, Err) {
 		return nil, OK
 	}
 	if args.ConfigNum > kv.config.Config.Num {
-		// 这种情况表示发送方的config比接收方config的版本更新，接收方没有做好接收的准备， 返回Err
+		// 这种情况表示发送方的config比接收方config的版本更新，接收方没有做好接收的准备，返回Err
 		return nil, ErrWrong
 	}
-	if !kv.shardMap[args.Shard.ShardID].Preparing {
+	if shard, ok := kv.shardMap[args.Shard.ShardID]; ok && shard.OK {
 		// 这个shard已经传输过了
 		return nil, OK
 	}
+
+	// if _, ok := kv.shardMap[args.Shard.ShardID]; !ok {
+	// 	Debug(dError, "G%v-S%v detect error, config:%v, shardMap:%v", kv.gid, kv.me, kv.config, kv.shardMap)
+	// 	panic("Error")
+	// }
 
 	// copy
 	shardID := args.Shard.ShardID
@@ -439,7 +485,8 @@ func (kv *ShardKV) execShardInput(args *ShardInputArgs) (interface{}, Err) {
 	for k, v := range args.Shard.LastAppliedMap {
 		kv.shardMap[shardID].LastAppliedMap[k] = v
 	}
-	kv.shardMap[shardID].Preparing = false
+	// ok = true
+	kv.shardMap[shardID].OK = true
 
 	// 更新InShard
 	delete(kv.config.InShard, shardID)
@@ -456,6 +503,11 @@ func (kv *ShardKV) execShardInput(args *ShardInputArgs) (interface{}, Err) {
 func (kv *ShardKV) execShardOutput(args *ShardOutputArgs) (interface{}, Err) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+
+	if !kv.config.Transition || args.ConfigNum != kv.config.Config.Num {
+		// 过时的shard output信息
+		return nil, OK
+	}
 
 	// 更新OutShard
 	delete(kv.config.OutShard, args.ShardID)
@@ -476,6 +528,11 @@ func (kv *ShardKV) checkReconfigDone() {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
+	if !kv.config.Transition {
+		// 已经完成检查
+		return
+	}
+
 	for range kv.config.InShard {
 		return
 	}
@@ -483,11 +540,21 @@ func (kv *ShardKV) checkReconfigDone() {
 		return
 	}
 
-	// 已完成re-config
+	// 已完成re-config，更新相应变量
 	kv.config.Transition = false
 	kv.config.OldConfig = nil
 	kv.config.InShard = nil
 	kv.config.OutShard = nil
+
+	// 主动进行一次snapshot，清除snapshot中多余的数据
+	if kv.maxraftstate != -1 {
+		// encode state machine
+		snapshot := kv.snapshot()
+		// 通知raft执行snapshot，丢弃已经不需要的log entries
+		kv.rf.Snapshot(kv.appliedIndex, snapshot)
+	}
+
+	Debug(dInfo, "G%v-S%v finish re-config num:%v", kv.gid, kv.me, kv.config.Config.Num)
 }
 
 // 等待raft apply cmds
@@ -500,6 +567,15 @@ func (kv *ShardKV) WaitForRaftAppliedMsg() {
 			var result interface{}
 			var err Err
 			op := applyMsg.Command.(Op)
+
+			kv.mu.Lock()
+			kv.appliedIndex = applyMsg.CommandIndex
+			kv.mu.Unlock()
+
+			// kv.mu.Lock()
+			// Debug(dCommit, "G%v-S%v apply cmd: %v, config:%v", kv.gid, kv.me, op, kv.config)
+			// // Debug(dCommit, "G%v-S%v apply cmd, config:%v", kv.gid, kv.me, kv.config)
+			// kv.mu.Unlock()
 
 			// TODO 好看点的写法？
 			switch op.Type {
@@ -546,6 +622,16 @@ func (kv *ShardKV) WaitForRaftAppliedMsg() {
 				// 通知raft执行snapshot，丢弃已经不需要的log entries
 				kv.rf.Snapshot(applyMsg.CommandIndex, snapshot)
 			}
+
+			// 为什么这么大
+			cnt := 0
+			for _, shard := range kv.shardMap {
+				for range shard.KVMap {
+					cnt++
+				}
+			}
+
+			Debug(dCommit, "G%v-S%v apply cmd: %v, snapshot_size:%v, raftstate_size:%v, key_count:%v, config:%v, shardmap:%v", kv.gid, kv.me, op, kv.persister.SnapshotSize(), kv.persister.RaftStateSize(), cnt, kv.config, kv.shardMap)
 			kv.mu.Unlock()
 			continue
 		}
@@ -564,7 +650,7 @@ func (kv *ShardKV) WaitForRaftAppliedMsg() {
 			var config Config
 			if d.Decode(&shardMap) != nil || d.Decode(&config) != nil {
 				// decode error
-				Debug(dError, "G%v-S%v decode snapshot error", kv.gid, kv.me)
+				// Debug(dError, "G%v-S%v decode snapshot error", kv.gid, kv.me)
 				kv.mu.Unlock()
 				continue
 			} else {
@@ -601,6 +687,8 @@ func (kv *ShardKV) CheckConfig() {
 
 			config := kv.ctrClerk.Query(nowConfigNum + 1)
 
+			// Debug(dTimer, "G%v-S%v query config %v, result:%v", kv.gid, kv.me, nowConfigNum, config)
+
 			kv.mu.Lock()
 			if !kv.config.Transition && kv.config.Config.Num+1 == config.Num {
 				op := Op{
@@ -618,7 +706,7 @@ func (kv *ShardKV) CheckConfig() {
 	}
 }
 
-func sendDataTransmit(srv *labrpc.ClientEnd, args *ShardInputArgs, reply *ShardInputReply) {
+func sendDataTransmitRPC(srv *labrpc.ClientEnd, args *ShardInputArgs, reply *ShardInputReply) {
 	srv.Call("ShardKV.DataTransmitHandler", args, reply)
 }
 
@@ -628,13 +716,16 @@ func (kv *ShardKV) DataTransmit(shardID int, gid int) Err {
 	shard, ok := kv.shardMap[shardID]
 	if !ok {
 		// 没有在shardMap找到这个shardid的数据，说明已经成功传输了
-		defer kv.mu.Unlock()
+		kv.mu.Unlock()
 		return OK
 	}
 
-	var args ShardInputArgs
-	args.ConfigNum = kv.config.Config.Num
-	args.Shard = *shard.Copy()
+	args := ShardInputArgs{
+		ConfigNum: kv.config.Config.Num,
+		Shard:     *shard.Copy(),
+		Gid:       kv.gid,
+		Server:    kv.me,
+	}
 	kv.mu.Unlock()
 
 	for {
@@ -643,21 +734,29 @@ func (kv *ShardKV) DataTransmit(shardID int, gid int) Err {
 			kv.mu.Unlock()
 			return ErrWrong
 		}
-		kv.mu.Unlock()
 
-		kv.mu.Lock()
 		if servers, ok := kv.config.Config.Groups[gid]; ok {
 			kv.mu.Unlock()
 			for _, server := range servers {
 				srv := kv.make_end(server)
 				var reply ShardInputReply
 
+				// kv.mu.Lock()
+				// Debug(dClient, "G%v-S%v send data transmit to %v", kv.gid, kv.me, server)
+				// kv.mu.Unlock()
+
 				// TODO timeout
-				ok := CallFunc(200*time.Millisecond, sendDataTransmit, srv, &args, &reply)
-				if !ok || reply.Err == ErrWrongLeader {
+
+				if ok := CallFunc(200*time.Millisecond, sendDataTransmitRPC, srv, &args, &reply); !ok {
 					continue
 				}
-				return reply.Err
+
+				switch reply.Err {
+				case "", ErrWrongLeader:
+					continue
+				default:
+					return reply.Err
+				}
 			}
 		} else {
 			kv.mu.Unlock()
@@ -681,10 +780,12 @@ func (kv *ShardKV) CheckTransmitShards() {
 	Loop:
 		for {
 			kv.mu.Lock()
-			if _, isLeader := kv.rf.GetState(); !kv.config.Transition || !isLeader || !kv.killed() {
+			if _, isLeader := kv.rf.GetState(); !kv.config.Transition || !isLeader || kv.killed() {
 				kv.mu.Unlock()
 				break
 			}
+
+			// Debug(dInfo, "G%v-S%v check transmit, config:%v, shardMap:%v", kv.gid, kv.me, kv.config, kv.shardMap)
 
 			shardID, gid := -1, -1
 			for k, v := range kv.config.OutShard {
@@ -692,22 +793,32 @@ func (kv *ShardKV) CheckTransmitShards() {
 				break
 			}
 			kv.mu.Unlock()
+
 			if shardID < 0 {
 				// 没有需要发送的shard
 				break
 			}
 
+			// kv.mu.Lock()
+			// Debug(dInfo, "G%v-S%v check transmit, shardID:%v, TargetGid:%v, config:%v, shardMap:%v", kv.gid, kv.me, shardID, gid, kv.config, kv.shardMap)
+			// kv.mu.Unlock()
+
 			// 发送shard，不断重试直至成功获得回应
 			// TODO 一个优化，在某一个shard上卡住了（一直收不到回信），这时候可以先发其它的shard
 			err := kv.DataTransmit(shardID, gid)
+
+			kv.mu.Lock()
 			switch err {
 			case OK:
 				// 成功传输（给目标group中的大多数servers），不再需要尝试传输该shard
-				// 需要做：1. 往log中写入一条entry通知其它servers 2. 删除该shard相关数据
-				// group中的servers如何确定需要传出的shard已经传输成功了？
+				// 需要做：1. 往log中写入一条entry通知其它servers 2. 删除该shard相关数据 3. 检查是否完成re-config
+				// group中的servers如何确定所有需要传出的shard已经传输成功了？
 
 				// 尝试写入log
-				args := ShardOutputArgs{shardID}
+				args := ShardOutputArgs{
+					ConfigNum: kv.config.Config.Num,
+					ShardID:   shardID,
+				}
 				var op Op
 				op.Type = OpShardOutput
 				op.Args = args
@@ -716,10 +827,21 @@ func (kv *ShardKV) CheckTransmitShards() {
 				// 删除shard相关数据
 				delete(kv.config.OutShard, shardID)
 				delete(kv.shardMap, shardID)
+
+				// 检查是否完成re-config
+				go func() {
+					kv.checkReconfigDone()
+				}()
+
+				// break
+				kv.mu.Unlock()
+				break Loop
 			case ErrWrong:
 				// something wrong
+				kv.mu.Unlock()
 				break Loop
 			default:
+				kv.mu.Unlock()
 				continue
 			}
 		}
@@ -729,12 +851,22 @@ func (kv *ShardKV) CheckTransmitShards() {
 	}
 }
 
+func (kv *ShardKV) snapshot_debug(mp map[int]*Shard) {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	for _, shard := range mp {
+		e.Encode(shard.KVMap)
+	}
+	Debug(dInfo, "G%v-S%v snapshot test, kvmap_size:%v", kv.gid, kv.me, len(w.Bytes()))
+}
+
 // encode state machine
 func (kv *ShardKV) snapshot() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.shardMap)
 	e.Encode(kv.config)
+	// kv.snapshot_debug(kv.shardMap)
 	return w.Bytes()
 }
 
@@ -749,7 +881,10 @@ func (kv *ShardKV) initializeFromSnapshot() {
 	if snapshot == nil || len(snapshot) < 1 {
 		// 在没有snapshot状态（初始状态）下启动
 		kv.shardMap = make(map[int]*Shard)
-		kv.config = Config{}
+		kv.config = Config{
+			Transition: false,
+			Config:     &shardctrler.Config{Num: 0},
+		}
 		return
 	}
 
@@ -758,8 +893,12 @@ func (kv *ShardKV) initializeFromSnapshot() {
 	if d.Decode(&kv.shardMap) != nil || d.Decode(&kv.config) != nil {
 		// decode error
 		kv.shardMap = make(map[int]*Shard)
-		kv.config = Config{}
-		Debug(dError, "G%v-S%v initialization error", kv.gid, kv.me)
+		kv.config = Config{
+			Transition: false,
+			Config:     &shardctrler.Config{Num: 0},
+		}
+		// Debug(dError, "G%v-S%v initialization error", kv.gid, kv.me)
+		panic("Snapshot Decode Error")
 	}
 }
 
@@ -828,7 +967,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.ctrlers = ctrlers
 	kv.ctrClerk = shardctrler.MakeClerk(kv.ctrlers)
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.appliedIndex = 0
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+
 	kv.appliedResultChMap = make(map[int]chan AppliedResultMsg)
 	kv.initializeFromSnapshot()
 
