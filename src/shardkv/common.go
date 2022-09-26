@@ -38,7 +38,7 @@ const (
 )
 
 const (
-	CountDivisor = 1000000007
+	RPCCountDivisor = 1000000007
 )
 
 type RPCIdentification struct {

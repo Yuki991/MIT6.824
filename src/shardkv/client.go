@@ -42,7 +42,19 @@ type Clerk struct {
 	sm       *shardctrler.Clerk
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
-	// You will have to modify this struct.
+
+	// TODO
+	clerkID  int64 // clerkID，目前做法是赋予一个极大的随机数(调用nrand)，小概率出错
+	rpcCount int   // rpc编号，从1开始
+	// TODO lastLeader
+}
+
+func (ck *Clerk) GetNewRPCIdentification() RPCIdentification {
+	ck.rpcCount = ck.rpcCount%RPCCountDivisor + 1
+	return RPCIdentification{
+		ClerkID: ck.clerkID,
+		RPCID:   ck.rpcCount,
+	}
 }
 
 //
@@ -58,8 +70,14 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck := new(Clerk)
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
-	// You'll have to add code here.
+	// TODO
+	ck.clerkID = nrand()
+	ck.rpcCount = 0
 	return ck
+}
+
+func (ck *Clerk) sendGetRPC(server *labrpc.ClientEnd, args *GetArgs, reply *GetReply) {
+	server.Call("ShardKV.GetHandler", args, reply)
 }
 
 //
@@ -69,28 +87,37 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 //
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{}
-	args.Key = key
+	args := GetArgs{
+		Key:      key,
+		Identity: ck.GetNewRPCIdentification(),
+	}
 
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
+		Loop:
 			for si := 0; si < len(servers); si++ {
-				srv := ck.make_end(servers[si])
 				var reply GetReply
-				ok := srv.Call("ShardKV.GetHandler", &args, &reply)
-				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+				srv := ck.make_end(servers[si])
+
+				if ok := CallFunc(200*time.Millisecond, ck.sendGetRPC, srv, &args, &reply); !ok {
+					continue
+				}
+
+				switch reply.Err {
+				case OK, ErrNoKey:
 					return reply.Value
+				case ErrWrongGroup:
+					break Loop
+				default:
+					continue
 				}
-				if ok && (reply.Err == ErrWrongGroup) {
-					break
-				}
-				// ... not ok, or ErrWrongLeader
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		// TODO
+		time.Sleep(10 * time.Millisecond)
 		// ask controler for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
@@ -98,34 +125,47 @@ func (ck *Clerk) Get(key string) string {
 	return ""
 }
 
+func (ck *Clerk) sendPutAppendRPC(server *labrpc.ClientEnd, args *PutAppendArgs, reply *PutAppendReply) {
+	server.Call("ShardKV.PutAppendHandler", args, reply)
+}
+
 //
 // shared by Put and Append.
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, op int) {
-	args := PutAppendArgs{}
-	args.Key = key
-	args.Value = value
-	args.Op = op
+	args := PutAppendArgs{
+		Key:      key,
+		Value:    value,
+		Op:       op,
+		Identity: ck.GetNewRPCIdentification(),
+	}
 
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
+		Loop:
 			for si := 0; si < len(servers); si++ {
-				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
-				ok := srv.Call("ShardKV.PutAppendHandler", &args, &reply)
-				if ok && reply.Err == OK {
+				srv := ck.make_end(servers[si])
+
+				if ok := CallFunc(200*time.Millisecond, ck.sendPutAppendRPC, srv, &args, &reply); !ok {
+					continue
+				}
+
+				switch reply.Err {
+				case OK:
 					return
+				case ErrWrongGroup:
+					break Loop
+				default:
+					continue
 				}
-				if ok && reply.Err == ErrWrongGroup {
-					break
-				}
-				// ... not ok, or ErrWrongLeader
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		// TODO
+		time.Sleep(10 * time.Millisecond)
 		// ask controler for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
