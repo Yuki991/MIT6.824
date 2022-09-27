@@ -173,7 +173,8 @@ func (op Op) String() string {
 	case OpPut:
 		str += "Put, "
 	case OpAppend:
-		str += "Append, "
+		args := op.Args.(PutAppendArgs)
+		str += "Append, " + fmt.Sprintf("key:%v, value:%v", args.Key, args.Value)
 	case OpGet:
 		str += "Get, "
 	case OpReconfig:

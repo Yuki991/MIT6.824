@@ -492,8 +492,6 @@ func TestConcurrent3(t *testing.T) {
 		go ff(i, ck1)
 	}
 
-	fmt.Printf("L1.\n")
-
 	t0 := time.Now()
 	for time.Since(t0) < 12*time.Second {
 		cfg.join(2)
@@ -512,16 +510,12 @@ func TestConcurrent3(t *testing.T) {
 		time.Sleep(time.Duration(rand.Int()%900) * time.Millisecond)
 	}
 
-	fmt.Printf("L2.\n")
-
 	time.Sleep(2 * time.Second)
 
 	atomic.StoreInt32(&done, 1)
 	for i := 0; i < n; i++ {
 		<-ch
 	}
-
-	fmt.Printf("L3.\n")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])

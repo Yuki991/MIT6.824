@@ -145,7 +145,7 @@ func (kv *ShardKV) submitClientReqToRaft(op *Op, id RPCIdentification, key strin
 	kv.mu.Lock()
 	shardID := key2shard(key)
 
-	// Debug(dInfo, "G%v-S%v receive cmd: %v, shardID:%v, config:%v, shardMap:%v", kv.gid, kv.me, *op, shardID, kv.config, kv.shardMap)
+	Debug(dInfo, "G%v-S%v receive cmd: %v, shardID:%v, config:%v, shardMap:%v", kv.gid, kv.me, *op, shardID, kv.config, kv.shardMap)
 
 	if !kv.serveFor(shardID) {
 		// server不负责这个shard
@@ -445,9 +445,7 @@ func (kv *ShardKV) execReconfig(args *ReconfigArgs) (interface{}, Err) {
 	}
 
 	// 存在不需要数据传输就能完成re-config的情况
-	go func() {
-		kv.checkReconfigDone()
-	}()
+	kv.checkReconfigDone()
 
 	// Debug(dInfo, "G%v-S%v start reconfig: %v", kv.gid, kv.me, kv.config)
 
@@ -492,9 +490,7 @@ func (kv *ShardKV) execShardInput(args *ShardInputArgs) (interface{}, Err) {
 	delete(kv.config.InShard, shardID)
 
 	// 检查是否完成reconfig
-	go func() {
-		kv.checkReconfigDone()
-	}()
+	kv.checkReconfigDone()
 
 	return nil, OK
 }
@@ -516,18 +512,13 @@ func (kv *ShardKV) execShardOutput(args *ShardOutputArgs) (interface{}, Err) {
 	delete(kv.shardMap, args.ShardID)
 
 	// 检查是否完成reconfig
-	go func() {
-		kv.checkReconfigDone()
-	}()
+	kv.checkReconfigDone()
 
 	return nil, OK
 }
 
-// 检查是否完成re-config
+// 检查是否完成re-config，请确认调用前已经上锁
 func (kv *ShardKV) checkReconfigDone() {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-
 	if !kv.config.Transition {
 		// 已经完成检查
 		return
@@ -572,10 +563,10 @@ func (kv *ShardKV) WaitForRaftAppliedMsg() {
 			kv.appliedIndex = applyMsg.CommandIndex
 			kv.mu.Unlock()
 
-			// kv.mu.Lock()
-			// Debug(dCommit, "G%v-S%v apply cmd: %v, config:%v", kv.gid, kv.me, op, kv.config)
-			// // Debug(dCommit, "G%v-S%v apply cmd, config:%v", kv.gid, kv.me, kv.config)
-			// kv.mu.Unlock()
+			kv.mu.Lock()
+			Debug(dCommit, "G%v-S%v apply cmd: %v, config:%v", kv.gid, kv.me, op, kv.config)
+			// Debug(dCommit, "G%v-S%v apply cmd, config:%v", kv.gid, kv.me, kv.config)
+			kv.mu.Unlock()
 
 			// TODO 好看点的写法？
 			switch op.Type {
@@ -624,14 +615,13 @@ func (kv *ShardKV) WaitForRaftAppliedMsg() {
 			}
 
 			// 为什么这么大
-			cnt := 0
-			for _, shard := range kv.shardMap {
-				for range shard.KVMap {
-					cnt++
-				}
-			}
-
-			Debug(dCommit, "G%v-S%v apply cmd: %v, snapshot_size:%v, raftstate_size:%v, key_count:%v, config:%v, shardmap:%v", kv.gid, kv.me, op, kv.persister.SnapshotSize(), kv.persister.RaftStateSize(), cnt, kv.config, kv.shardMap)
+			// cnt := 0
+			// for _, shard := range kv.shardMap {
+			// 	for range shard.KVMap {
+			// 		cnt++
+			// 	}
+			// }
+			// Debug(dCommit, "G%v-S%v apply cmd: %v, snapshot_size:%v, raftstate_size:%v, key_count:%v, config:%v, shardmap:%v", kv.gid, kv.me, op, kv.persister.SnapshotSize(), kv.persister.RaftStateSize(), cnt, kv.config, kv.shardMap)
 			kv.mu.Unlock()
 			continue
 		}
@@ -687,7 +677,7 @@ func (kv *ShardKV) CheckConfig() {
 
 			config := kv.ctrClerk.Query(nowConfigNum + 1)
 
-			// Debug(dTimer, "G%v-S%v query config %v, result:%v", kv.gid, kv.me, nowConfigNum, config)
+			Debug(dTimer, "G%v-S%v query config %v, result:%v", kv.gid, kv.me, nowConfigNum, config)
 
 			kv.mu.Lock()
 			if !kv.config.Transition && kv.config.Config.Num+1 == config.Num {
@@ -829,9 +819,7 @@ func (kv *ShardKV) CheckTransmitShards() {
 				delete(kv.shardMap, shardID)
 
 				// 检查是否完成re-config
-				go func() {
-					kv.checkReconfigDone()
-				}()
+				kv.checkReconfigDone()
 
 				// break
 				kv.mu.Unlock()
@@ -851,22 +839,12 @@ func (kv *ShardKV) CheckTransmitShards() {
 	}
 }
 
-func (kv *ShardKV) snapshot_debug(mp map[int]*Shard) {
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	for _, shard := range mp {
-		e.Encode(shard.KVMap)
-	}
-	Debug(dInfo, "G%v-S%v snapshot test, kvmap_size:%v", kv.gid, kv.me, len(w.Bytes()))
-}
-
 // encode state machine
 func (kv *ShardKV) snapshot() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.shardMap)
 	e.Encode(kv.config)
-	// kv.snapshot_debug(kv.shardMap)
 	return w.Bytes()
 }
 
@@ -911,7 +889,6 @@ func (kv *ShardKV) initializeFromSnapshot() {
 func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
 	atomic.StoreInt32(&kv.dead, 1)
-	// Your code here, if desired.
 }
 
 func (kv *ShardKV) killed() bool {

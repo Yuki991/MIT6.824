@@ -43,7 +43,6 @@ type Clerk struct {
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 
-	// TODO
 	clerkID  int64 // clerkID，目前做法是赋予一个极大的随机数(调用nrand)，小概率出错
 	rpcCount int   // rpc编号，从1开始
 	// TODO lastLeader
@@ -70,7 +69,7 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck := new(Clerk)
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
-	// TODO
+
 	ck.clerkID = nrand()
 	ck.rpcCount = 0
 	return ck
@@ -102,7 +101,7 @@ func (ck *Clerk) Get(key string) string {
 				var reply GetReply
 				srv := ck.make_end(servers[si])
 
-				if ok := CallFunc(200*time.Millisecond, ck.sendGetRPC, srv, &args, &reply); !ok {
+				if ok := CallFunc(1000*time.Millisecond, ck.sendGetRPC, srv, &args, &reply); !ok {
 					continue
 				}
 
@@ -116,8 +115,8 @@ func (ck *Clerk) Get(key string) string {
 				}
 			}
 		}
-		// TODO
-		time.Sleep(10 * time.Millisecond)
+
+		time.Sleep(100 * time.Millisecond)
 		// ask controler for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
@@ -150,7 +149,7 @@ func (ck *Clerk) PutAppend(key string, value string, op int) {
 				var reply PutAppendReply
 				srv := ck.make_end(servers[si])
 
-				if ok := CallFunc(200*time.Millisecond, ck.sendPutAppendRPC, srv, &args, &reply); !ok {
+				if ok := CallFunc(1000*time.Millisecond, ck.sendPutAppendRPC, srv, &args, &reply); !ok {
 					continue
 				}
 
@@ -164,8 +163,8 @@ func (ck *Clerk) PutAppend(key string, value string, op int) {
 				}
 			}
 		}
-		// TODO
-		time.Sleep(10 * time.Millisecond)
+
+		time.Sleep(100 * time.Millisecond)
 		// ask controler for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
