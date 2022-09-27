@@ -87,7 +87,7 @@ func (ck *Clerk) Query(num int) Config {
 			var reply QueryReply
 			server := (i + ck.lastLeader) % len(ck.servers)
 
-			if ok := CallFunc(300*time.Millisecond, ck.sendQueryRPC, server, &args, &reply); !ok {
+			if ok := CallFunc(1000*time.Millisecond, ck.sendQueryRPC, server, &args, &reply); !ok {
 				continue
 			}
 
@@ -124,7 +124,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 			var reply JoinReply
 			server := (i + ck.lastLeader) % len(ck.servers)
 
-			if ok := CallFunc(300*time.Millisecond, ck.sendJoinRPC, server, &args, &reply); !ok {
+			if ok := CallFunc(1000*time.Millisecond, ck.sendJoinRPC, server, &args, &reply); !ok {
 				continue
 			}
 
@@ -160,7 +160,7 @@ func (ck *Clerk) Leave(gids []int) {
 			var reply LeaveReply
 			server := (i + ck.lastLeader) % len(ck.servers)
 
-			if ok := CallFunc(300*time.Millisecond, ck.sendLeaveRPC, server, &args, &reply); !ok {
+			if ok := CallFunc(1000*time.Millisecond, ck.sendLeaveRPC, server, &args, &reply); !ok {
 				continue
 			}
 
@@ -197,7 +197,7 @@ func (ck *Clerk) Move(shard int, gid int) {
 			var reply MoveReply
 			server := (i + ck.lastLeader) % len(ck.servers)
 
-			if ok := CallFunc(300*time.Millisecond, ck.sendMoveRPC, server, &args, &reply); !ok {
+			if ok := CallFunc(1000*time.Millisecond, ck.sendMoveRPC, server, &args, &reply); !ok {
 				continue
 			}
 
