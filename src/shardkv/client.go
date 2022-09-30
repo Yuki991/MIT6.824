@@ -75,8 +75,9 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	return ck
 }
 
-func (ck *Clerk) sendGetRPC(server *labrpc.ClientEnd, args *GetArgs, reply *GetReply) {
-	server.Call("ShardKV.GetHandler", args, reply)
+func (ck *Clerk) sendGetRPC(server *labrpc.ClientEnd, args *GetArgs, reply *GetReply) bool {
+	ok := server.Call("ShardKV.GetHandler", args, reply)
+	return ok
 }
 
 //
@@ -101,7 +102,7 @@ func (ck *Clerk) Get(key string) string {
 				var reply GetReply
 				srv := ck.make_end(servers[si])
 
-				if ok := CallFunc(1000*time.Millisecond, ck.sendGetRPC, srv, &args, &reply); !ok {
+				if _, ok := CallFunc(1000*time.Millisecond, ck.sendGetRPC, srv, &args, &reply); !ok {
 					continue
 				}
 
@@ -124,8 +125,9 @@ func (ck *Clerk) Get(key string) string {
 	return ""
 }
 
-func (ck *Clerk) sendPutAppendRPC(server *labrpc.ClientEnd, args *PutAppendArgs, reply *PutAppendReply) {
-	server.Call("ShardKV.PutAppendHandler", args, reply)
+func (ck *Clerk) sendPutAppendRPC(server *labrpc.ClientEnd, args *PutAppendArgs, reply *PutAppendReply) bool {
+	ok := server.Call("ShardKV.PutAppendHandler", args, reply)
+	return ok
 }
 
 //
@@ -149,7 +151,7 @@ func (ck *Clerk) PutAppend(key string, value string, op int) {
 				var reply PutAppendReply
 				srv := ck.make_end(servers[si])
 
-				if ok := CallFunc(1000*time.Millisecond, ck.sendPutAppendRPC, srv, &args, &reply); !ok {
+				if _, ok := CallFunc(1000*time.Millisecond, ck.sendPutAppendRPC, srv, &args, &reply); !ok {
 					continue
 				}
 

@@ -696,8 +696,9 @@ func (kv *ShardKV) CheckConfig() {
 	}
 }
 
-func sendDataTransmitRPC(srv *labrpc.ClientEnd, args *ShardInputArgs, reply *ShardInputReply) {
-	srv.Call("ShardKV.DataTransmitHandler", args, reply)
+func sendDataTransmitRPC(srv *labrpc.ClientEnd, args *ShardInputArgs, reply *ShardInputReply) bool {
+	ok := srv.Call("ShardKV.DataTransmitHandler", args, reply)
+	return ok
 }
 
 func (kv *ShardKV) DataTransmit(shardID int, gid int) Err {
@@ -737,7 +738,7 @@ func (kv *ShardKV) DataTransmit(shardID int, gid int) Err {
 
 				// TODO timeout
 
-				if ok := CallFunc(200*time.Millisecond, sendDataTransmitRPC, srv, &args, &reply); !ok {
+				if _, ok := CallFunc(200*time.Millisecond, sendDataTransmitRPC, srv, &args, &reply); !ok {
 					continue
 				}
 

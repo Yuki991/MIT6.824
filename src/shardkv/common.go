@@ -92,7 +92,7 @@ type ShardInputReply struct {
 }
 
 type ShardOutputArgs struct {
-	ConfigNum int
+	ConfigNum int // config num，用于辨识是否已经过时
 	ShardID   int
 }
 
@@ -119,17 +119,18 @@ func If(condition bool, trueVal interface{}, falseVal interface{}) interface{} {
 	return falseVal
 }
 
-// TODO 这个处理得不好，没有处理f的返回值
-func CallFunc(timeout time.Duration, f interface{}, args ...interface{}) bool {
+// 用给定参数args调用f，超过timeout直接返回
+func CallFunc(timeout time.Duration, f interface{}, args ...interface{}) ([]interface{}, bool) {
 	ch := make(chan bool)
 	_f := reflect.ValueOf(f)
+	var _r []reflect.Value
 	_args := make([]reflect.Value, len(args))
 	for i, v := range args {
 		_args[i] = reflect.ValueOf(v)
 	}
 
 	go func() {
-		_f.Call(_args)
+		_r = _f.Call(_args)
 		ch <- true
 	}()
 	go func() {
@@ -141,7 +142,15 @@ func CallFunc(timeout time.Duration, f interface{}, args ...interface{}) bool {
 	go func() {
 		<-ch
 	}()
-	return ok
+
+	if ok {
+		result := make([]interface{}, len(_r))
+		for i, v := range _r {
+			result[i] = (interface{})(v)
+		}
+		return result, true
+	}
+	return nil, false
 }
 
 func (s *Shard) String() string {
