@@ -7,7 +7,6 @@ package shardctrler
 import (
 	"crypto/rand"
 	"math/big"
-	"reflect"
 	"time"
 
 	"6.824/labrpc"
@@ -18,30 +17,6 @@ type Clerk struct {
 	clerkID    int64
 	rpcCount   int
 	lastLeader int
-}
-
-func CallFunc(timeout time.Duration, f interface{}, args ...interface{}) bool {
-	ch := make(chan bool)
-	_f := reflect.ValueOf(f)
-	_args := make([]reflect.Value, len(args))
-	for i, v := range args {
-		_args[i] = reflect.ValueOf(v)
-	}
-
-	go func() {
-		_f.Call(_args)
-		ch <- true
-	}()
-	go func() {
-		time.Sleep(timeout)
-		ch <- false
-	}()
-
-	ok := <-ch
-	go func() {
-		<-ch
-	}()
-	return ok
 }
 
 func (ck *Clerk) GetNewRPCIdentification() RPCIdentification {
@@ -87,7 +62,7 @@ func (ck *Clerk) Query(num int) Config {
 			var reply QueryReply
 			server := (i + ck.lastLeader) % len(ck.servers)
 
-			if ok := CallFunc(1000*time.Millisecond, ck.sendQueryRPC, server, &args, &reply); !ok {
+			if _, ok := CallFunc(1000*time.Millisecond, ck.sendQueryRPC, server, &args, &reply); !ok {
 				continue
 			}
 
@@ -124,7 +99,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 			var reply JoinReply
 			server := (i + ck.lastLeader) % len(ck.servers)
 
-			if ok := CallFunc(1000*time.Millisecond, ck.sendJoinRPC, server, &args, &reply); !ok {
+			if _, ok := CallFunc(1000*time.Millisecond, ck.sendJoinRPC, server, &args, &reply); !ok {
 				continue
 			}
 
@@ -160,7 +135,7 @@ func (ck *Clerk) Leave(gids []int) {
 			var reply LeaveReply
 			server := (i + ck.lastLeader) % len(ck.servers)
 
-			if ok := CallFunc(1000*time.Millisecond, ck.sendLeaveRPC, server, &args, &reply); !ok {
+			if _, ok := CallFunc(1000*time.Millisecond, ck.sendLeaveRPC, server, &args, &reply); !ok {
 				continue
 			}
 
@@ -197,7 +172,7 @@ func (ck *Clerk) Move(shard int, gid int) {
 			var reply MoveReply
 			server := (i + ck.lastLeader) % len(ck.servers)
 
-			if ok := CallFunc(1000*time.Millisecond, ck.sendMoveRPC, server, &args, &reply); !ok {
+			if _, ok := CallFunc(1000*time.Millisecond, ck.sendMoveRPC, server, &args, &reply); !ok {
 				continue
 			}
 

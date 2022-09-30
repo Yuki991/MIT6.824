@@ -1,5 +1,10 @@
 package shardctrler
 
+import (
+	"reflect"
+	"time"
+)
+
 //
 // Shard controler: assigns shards to replication groups.
 //
@@ -106,4 +111,37 @@ func (c *Config) Copy() Config {
 		r.Groups[k] = v
 	}
 	return r
+}
+
+func CallFunc(timeout time.Duration, f interface{}, args ...interface{}) ([]interface{}, bool) {
+	ch := make(chan bool)
+	_f := reflect.ValueOf(f)
+	var _r []reflect.Value
+	_args := make([]reflect.Value, len(args))
+	for i, v := range args {
+		_args[i] = reflect.ValueOf(v)
+	}
+
+	go func() {
+		_r = _f.Call(_args)
+		ch <- true
+	}()
+	go func() {
+		time.Sleep(timeout)
+		ch <- false
+	}()
+
+	ok := <-ch
+	go func() {
+		<-ch
+	}()
+
+	if ok {
+		result := make([]interface{}, len(_r))
+		for i, v := range _r {
+			result[i] = (interface{})(v)
+		}
+		return result, true
+	}
+	return nil, false
 }
