@@ -34,39 +34,6 @@ func nrand() int64 {
 	return x
 }
 
-// timeout: 超时时间
-// f:       传入的函数
-// args:    传入的参数
-// 功能：    传入一个函数及参数，用该参数调用函数，如果函数没有在timeout时间内结束，则返回false，否则返回true
-func CallFunc(timeout time.Duration, f interface{}, args ...interface{}) bool {
-	ch := make(chan bool)
-	_f := reflect.ValueOf(f)
-	_args := make([]reflect.Value, len(args))
-	for i := range args {
-		_args[i] = reflect.ValueOf(args[i])
-	}
-
-	// if _f.Kind() != reflect.Func {
-	// 	panic(fmt.Sprintf("CallFunc: second parameter must be a function"))
-	// }
-
-	go func() {
-		_f.Call(_args)
-		ch <- true
-	}()
-	go func() {
-		time.Sleep(timeout)
-		ch <- false
-	}()
-
-	ok := <-ch
-	go func() {
-		// 保证前面两个goroutine能够结束
-		<-ch
-	}()
-	return ok
-}
-
 func (ck *Clerk) GetNewRPCIdentification() RPCIdentification {
 	// ck.mu.Lock()
 	// defer ck.mu.Unlock()
@@ -122,7 +89,7 @@ func (ck *Clerk) Get(key string) string {
 			reply := GetReply{}
 			Debug(dError, "client %v send new request to S%d", reflect.ValueOf(ck).Pointer(), server)
 			// 这个果然跟之前有一样的问题，如果server断开连接导致没有返回，这个会一直阻塞...需要自己手动写一个超时处理
-			if ok := CallFunc(300*time.Millisecond, ck.sendGetRPC, server, &args, &reply); !ok {
+			if _, ok := CallFunc(300*time.Millisecond, ck.sendGetRPC, server, &args, &reply); !ok {
 				// if !ck.sendGetRPC(server, &args, &reply) {
 				// rpc没有收到回复，尝试下一个server
 				continue
@@ -196,7 +163,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			server := (i + ck.lastLeader) % len(ck.servers)
 			reply := PutAppendReply{}
 			Debug(dError, "client %v send new request to S%d", reflect.ValueOf(ck).Pointer(), server)
-			if ok := CallFunc(300*time.Millisecond, ck.sendPutAppendRPC, server, &args, &reply); !ok || reply.Err == "" {
+			if _, ok := CallFunc(300*time.Millisecond, ck.sendPutAppendRPC, server, &args, &reply); !ok || reply.Err == "" {
 				// if !ck.sendPutAppendRPC(server, &args, &reply) {
 				// rpc没有收到回复，尝试下一个server
 				continue
