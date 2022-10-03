@@ -443,6 +443,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if isLeader && !rf.killed() {
 		// Debug(dLeader, "S%d receive command", rf.me)
 		rf.Log.AppendSingle(LogEntry{term, command})
+		rf.nextIndex[rf.me] = index
 		rf.persist()
 	}
 
@@ -500,7 +501,7 @@ func (rf *Raft) convertToCandidate() {
 				done <- struct{}{}
 			}
 		}
-		if atomic.LoadInt32(&voteCnt) <= int32(len(rf.peers))/2 {
+		if len(rf.peers) <= 1 || atomic.LoadInt32(&voteCnt) <= int32(len(rf.peers))/2 {
 			done <- struct{}{}
 		}
 	}()
@@ -648,7 +649,13 @@ func (rf *Raft) convertToLeader() {
 		// rf.me, &rf, rf.serverState, rf.Log.GetLastEntryIndex(), rf.CurrentTerm, rf.nextIndex, rf.matchIndex, arr, mIndex, rf.Log)
 
 		rf.mu.Lock()
-		if newCommitIndex := arr[mIndex]; newCommitIndex > rf.CommitIndex &&
+		var newCommitIndex int
+		if mIndex < 0 {
+			newCommitIndex = rf.Log.GetLastEntryIndex()
+		} else {
+			newCommitIndex = arr[mIndex]
+		}
+		if newCommitIndex > rf.CommitIndex &&
 			rf.Log.GetTerm(newCommitIndex) == rf.CurrentTerm {
 			rf.CommitIndex = newCommitIndex
 		}
